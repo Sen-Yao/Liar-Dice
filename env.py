@@ -298,7 +298,7 @@ class LiarDiceEnv(AECEnv):
 
         if new_guess.mode == '飞' and old_guess.mode == '斋':
             # To go from '斋' to '飞', you need more than half the '斋' count
-            required_count = (old_guess.count // 2) + 1
+            required_count = (old_guess.count * 2) + 1
             if new_guess.count > required_count:
                 return True
             if new_guess.count == required_count and new_guess.face > old_guess.face:
