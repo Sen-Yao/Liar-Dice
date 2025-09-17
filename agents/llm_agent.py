@@ -19,7 +19,7 @@ class LLMAgent:
         # 从环境变量读取API配置
         self.api_base = os.getenv('LLM_API_BASE', 'https://api2.aigcbest.top/v1')
         self.api_key = os.getenv('LLM_API_KEY', 'sk-xxx')
-        self.model = os.getenv('LLM_MODEL', 'gemini-2.5-flash-nothinking')
+        self.model = os.getenv('LLM_MODEL', 'gpt-4o-mini')
         
         # 创建OpenAI客户端
         self.client = OpenAI(
