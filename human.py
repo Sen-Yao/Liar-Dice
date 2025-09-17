@@ -1,6 +1,7 @@
 from env import LiarDiceEnv
 from agents.human_agent import HumanAgent
 from agents.basic_agent import BasicRuleAgent
+from agents.llm_agent import LLMAgent
 
 def run_human_vs_ai_mode(args):
     """运行人机对战模式"""
@@ -28,7 +29,10 @@ def run_human_vs_ai_mode(args):
     # 创建AI玩家
     for i in range(args.num_players):
         if i != human_player_idx:
-            agents[f"player_{i}"] = BasicRuleAgent(f"player_{i}", args.num_players)
+            if args.agent_type == "llm":
+                agents[f"player_{i}"] = LLMAgent(f"player_{i}", args.num_players)
+            else:
+                agents[f"player_{i}"] = BasicRuleAgent(f"player_{i}", args.num_players)
     
     print(f"\n🎮 游戏设置:")
     print(f"你是: player_{human_player_idx} (人类)")

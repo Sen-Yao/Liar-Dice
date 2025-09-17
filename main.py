@@ -1,6 +1,7 @@
 import argparse
 from env import LiarDiceEnv
 from agents.basic_agent import BasicRuleAgent
+from agents.llm_agent import LLMAgent
 from human import run_human_vs_ai_mode
 
 def main(args):
@@ -20,7 +21,18 @@ def run_ai_training_mode(args):
     print("="*40)
     
     env = LiarDiceEnv(num_players=args.num_players, render_mode="human" if args.render else None)
-    agents = {agent: BasicRuleAgent(agent, args.num_players) for agent in env.possible_agents}
+    
+    # 根据agent类型创建agents
+    agents = {}
+    for agent in env.possible_agents:
+        if args.agent_type == "llm":
+            agents[agent] = LLMAgent(agent, args.num_players)
+        else:
+            agents[agent] = BasicRuleAgent(agent, args.num_players)
+    
+    print(f"🤖 使用 {args.agent_type.upper()} Agent 类型")
+    print(f"👥 玩家数量: {args.num_players}")
+    print(f"🎯 比赛场数: {args.num_match}")
     
     for match in range(args.num_match):
         print(f"\n\n--- MATCH {match + 1} STARTING ---")
@@ -47,18 +59,21 @@ if __name__ == "__main__":
         description="骰子骗子游戏 - 支持人机对战和AI训练",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
-使用示例:
-  # AI训练模式 (默认)
-  python main.py
-  
-  # 人机对战模式
-  python main.py --mode human
-  
-  # 人机对战，4个玩家，3场比赛
-  python main.py --mode human --num_players 4 --num_match 3
-  
-  # 启用详细渲染
-  python main.py --mode human --render
+        使用示例:
+        # AI训练模式 (默认) - 使用规则Agent
+        python main.py
+        
+        # AI训练模式 - 使用LLM Agent
+        python main.py --agent_type llm
+        
+        # 人机对战模式
+        python main.py --mode human
+        
+        # 人机对战，4个玩家，3场比赛
+        python main.py --mode human --num_players 4 --num_match 3
+        
+        # 启用详细渲染
+        python main.py --mode human --render
         """
     )
     
@@ -67,6 +82,12 @@ if __name__ == "__main__":
         choices=["ai", "human"], 
         default="ai",
         help="游戏模式: 'ai'为AI训练模式，'human'为人机对战模式 (默认: ai)"
+    )
+    parser.add_argument(
+        "--agent_type", 
+        choices=["basic", "llm"], 
+        default="basic",
+        help="AI训练模式下的Agent类型: 'basic'为规则Agent，'llm'为LLM Agent (默认: basic)"
     )
     parser.add_argument(
         "--render", 
