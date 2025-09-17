@@ -36,14 +36,14 @@ class HumanAgent:
         # 显示上一个猜测
         if observation['last_guess'] is not None:
             last_guess = observation['last_guess']
-            print(f"\n🎯 上一个猜测: {last_guess.mode} {last_guess.count} 个 {last_guess.face}")
+            print(f"\n🎯 上一个猜测: {last_guess.count} 个 {last_guess.face} {last_guess.mode}")
         
         # 显示操作历史
         if observation['game_round_history']:
             print(f"\n📝 本轮历史:")
             for player_idx, guess in observation['game_round_history']:
                 player_name = self._get_player_name(player_idx, observation['current_player_id_idx'])
-                print(f"  {player_name}: {guess.mode} {guess.count} 个 {guess.face}")
+                print(f"  {player_name}: {guess.count} 个 {guess.face} {guess.mode}")
     
     def _get_player_name(self, player_idx: int, current_player_idx: int) -> str:
         """获取玩家名称"""
@@ -97,21 +97,6 @@ class HumanAgent:
             try:
                 print("\n请输入你的猜测:")
                 
-                # 选择模式
-                print("选择模式:")
-                print("1. 飞 (点数1作为万能牌)")
-                print("2. 斋 (点数1不作为万能牌)")
-                
-                mode_choice = input("请选择模式 (1/2): ").strip().lower()
-                if mode_choice in ["1", "飞", "fly", ""]:
-                    mode = '飞'
-                    valid_faces = [2, 3, 4, 5, 6]
-                elif mode_choice in ["2", "斋", "zhai"]:
-                    mode = '斋'
-                    valid_faces = [1, 2, 3, 4, 5, 6]
-                else:
-                    print("❌ 无效模式选择!")
-                    continue
                 
                 # 输入数量
                 max_count = observation['total_dice_on_table']
@@ -122,11 +107,29 @@ class HumanAgent:
                     continue
                 
                 # 输入点数
-                face_input = input(f"请输入点数 ({valid_faces}): ").strip()
+                valid_faces = [1, 2, 3, 4, 5, 6]
+                face_input = input(f"请输入点数 ({[1, 2, 3, 4, 5, 6]}): ").strip()
                 face = int(face_input)
                 if face not in valid_faces:
                     print(f"❌ 点数必须是{valid_faces}中的一个!")
                     continue
+                
+                                # 选择模式
+                print("选择模式:")
+                print("1. 飞 (点数1作为万能牌)")
+                print("2. 斋 (点数1不作为万能牌)")
+                
+                if face != 1:
+                    mode_choice = input("请选择模式 (1/2): ").strip().lower()
+                    if mode_choice in ["1", "飞", "fly", ""]:
+                        mode = '飞'
+                    elif mode_choice in ["2", "斋", "zhai"]:
+                        mode = '斋'
+                    else:
+                        print("❌ 无效模式选择!")
+                        continue
+                else:
+                    mode = '斋'
                 
                 guess = Guess(mode=mode, count=count, face=face)
                 
@@ -134,7 +137,7 @@ class HumanAgent:
                 if not self._is_valid_guess(guess, observation):
                     continue
                 
-                print(f"✅ 你的猜测: {mode} {count} 个 {face}")
+                print(f"✅ 你的猜测: {count} 个 {face} {mode}")
                 return guess
                 
             except ValueError:
@@ -157,8 +160,8 @@ class HumanAgent:
             # 必须大于上一个猜测
             if not LiarDiceEnv._is_strictly_greater(guess, observation['last_guess']):
                 print("❌ 你的猜测必须大于上一个猜测!")
-                print(f"上一个猜测: {observation['last_guess'].mode} {observation['last_guess'].count} 个 {observation['last_guess'].face}")
-                print(f"你的猜测: {guess.mode} {guess.count} 个 {guess.face}")
+                print(f"上一个猜测: {observation['last_guess'].count} 个 {observation['last_guess'].face} {observation['last_guess'].mode}")
+                print(f"你的猜测: {guess.count} 个 {guess.face} {guess.mode}")
                 return False
         
         return True

@@ -42,7 +42,7 @@ class LLMAgent:
         猜测规则：
         1. 第一个回合必须猜测，且数量必须大于玩家数({self.num_players})
         2. 后续回合必须出大于上一个猜测的猜测
-        3. 猜测格式：(模式, 数量, 点数)
+        3. 猜测格式：(数量, 点数, 模式)
         4. 模式选择："飞"(1作为万能牌) 或 "斋"(1仅作为1)
         5. "飞"模式点数范围：2-6，"斋"模式点数范围：1-6
 
@@ -103,7 +103,7 @@ class LLMAgent:
         # 添加上一个猜测
         if observation['last_guess'] is not None:
             last_guess = observation['last_guess']
-            description += f"\n\n上一个猜测：{last_guess.mode}模式 {last_guess.count}个{last_guess.face}"
+            description += f"\n\n上一个猜测：{last_guess.count}个{last_guess.face}{last_guess.mode}"
         else:
             description += "\n\n这是本回合的第一个猜测"
         
@@ -112,7 +112,7 @@ class LLMAgent:
             description += "\n\n本轮历史："
             for player_idx, guess in observation['game_round_history']:
                 player_name = "你" if player_idx == observation['current_player_id_idx'] else f"玩家{player_idx}"
-                description += f"\n- {player_name}: {guess.mode} {guess.count}个{guess.face}"
+                description += f"\n- {player_name}: {guess.count}个{guess.face}{guess.mode}"
         
         description += f"\n\n现在轮到你行动了。请做出你的决策。"
         

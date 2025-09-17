@@ -69,7 +69,7 @@ def run_human_vs_ai_mode(args):
                     if isinstance(action, type(None)):
                         pass
                     elif hasattr(action, 'mode'):  # Guess对象
-                        print(f"\n🤖 {agent_id} 猜测: {action.mode} {action.count} 个 {action.face}")
+                        print(f"\n🤖 {agent_id} 猜测: {action.count} 个 {action.face} {action.mode}")
                     else:  # Challenge对象
                         print(f"\n🤖 {agent_id} 选择检验!")
             
@@ -99,7 +99,7 @@ def run_human_vs_ai_mode(args):
         
         # 显示最后一个猜测（如果有）
         if env.last_guess is not None:
-            print(f"\n🎯 最后一个猜测: {env.last_guess.mode} {env.last_guess.count} 个 {env.last_guess.face}")
+            print(f"\n🎯 最后一个猜测: {env.last_guess.count} 个 {env.last_guess.face} {env.last_guess.mode}")
             actual_count = env._count_dice(env.last_guess)
             print(f"实际数量: {actual_count}")
             if actual_count >= env.last_guess.count:

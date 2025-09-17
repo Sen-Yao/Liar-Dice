@@ -47,7 +47,10 @@ def run_ai_training_mode(args):
             else:
                 agent_obj = agents[agent_id]
                 action = agent_obj.get_action(observation)
-                print(f"Agent {agent_id} acts: {action}")
+                if hasattr(action, 'mode'):  # Guess对象
+                    print(f"Agent {agent_id} acts: {action.count} 个 {action.face} {action.mode}")
+                else:  # Challenge对象
+                    print(f"Agent {agent_id} acts: Challenge()")
             
             env.step(action)
         
