@@ -81,6 +81,30 @@ def run_human_vs_ai_mode(args):
             player_type = "你" if agent == f"player_{human_player_idx}" else f"{agent}"
             print(f"  {player_type}: {penalty} 分")
         
+        # 显示所有玩家的骰子情况
+        print(f"\n🎲 所有玩家的骰子情况:")
+        print(f"{"玩家":<12} {"骰子"}")
+        print(f"{"-"*12} {"-"*20}")
+        
+        # 直接遍历player_hands，因为游戏结束后agents列表可能被清空
+        for agent in env.player_hands:
+            dice_hand = env.player_hands[agent]
+            sorted_dice = sorted(dice_hand)
+            dice_str = f"[{', '.join(map(str, sorted_dice))}]"
+            
+            player_name = "你" if agent == f"player_{human_player_idx}" else agent
+            print(f"{player_name:<12} {dice_str}")
+        
+        # 显示最后一个猜测（如果有）
+        if env.last_guess is not None:
+            print(f"\n🎯 最后一个猜测: {env.last_guess.mode} {env.last_guess.count} 个 {env.last_guess.face}")
+            actual_count = env._count_dice(env.last_guess)
+            print(f"实际数量: {actual_count}")
+            if actual_count >= env.last_guess.count:
+                print("✅ 猜测是正确的")
+            else:
+                print("❌ 猜测是错误的")
+        
         # 显示获胜者
         human_penalty = env.penalties[f"player_{human_player_idx}"]
         min_penalty = min(env.penalties.values())
