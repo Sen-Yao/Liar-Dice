@@ -8,8 +8,7 @@ def main(args):
     env = LiarDiceEnv(num_players=args.num_players, render_mode="human" if args.render else None)
     agents = {agent: BasicRuleAgent(agent, args.num_players) for agent in env.possible_agents}
     
-    NUM_MATCHES = 2
-    for match in range(NUM_MATCHES):
+    for match in range(args.num_match):
         print(f"\n\n--- MATCH {match + 1} STARTING ---")
         env.reset()
         
@@ -33,6 +32,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--render", action="store_true", help="Enable rendering")
     parser.add_argument("--num_players", type=int, default=4, help="Number of players")
+    parser.add_argument("--num_match", type=int, default=1, help="Number of matches")
     args = parser.parse_args()
     
     main(args)
