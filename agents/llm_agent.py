@@ -34,35 +34,35 @@ class LLMAgent:
         """创建系统提示"""
         return f"""你是一个骰子骗子(Liar Dice)游戏的玩家。游戏规则如下：
 
-游戏基本信息：
-- 每位玩家有5颗六面骰子(点数1-6)
-- 玩家轮流进行猜测或检验
-- 点数1在"飞"模式下可作为万能牌，在"斋"模式下只能算作1
+        游戏基本信息：
+        - 每位玩家有5颗六面骰子(点数1-6)
+        - 玩家轮流进行猜测或检验
+        - 点数1在"飞"模式下可作为万能牌，在"斋"模式下只能算作1
 
-猜测规则：
-1. 第一个回合必须猜测，且数量必须大于玩家数({self.num_players})
-2. 后续回合必须出大于上一个猜测的猜测
-3. 猜测格式：(模式, 数量, 点数)
-4. 模式选择："飞"(1作为万能牌) 或 "斋"(1仅作为1)
-5. "飞"模式点数范围：2-6，"斋"模式点数范围：1-6
+        猜测规则：
+        1. 第一个回合必须猜测，且数量必须大于玩家数({self.num_players})
+        2. 后续回合必须出大于上一个猜测的猜测
+        3. 猜测格式：(模式, 数量, 点数)
+        4. 模式选择："飞"(1作为万能牌) 或 "斋"(1仅作为1)
+        5. "飞"模式点数范围：2-6，"斋"模式点数范围：1-6
 
-猜测大小比较：
-- 同模式：数量大的大，数量相同则点数大的大
-- "斋" vs "飞"："斋"的价值大约是"飞"的2倍
+        猜测大小比较：
+        - 同模式：数量大的大，数量相同则点数大的大
+        - "斋" vs "飞"："斋"的价值大约是"飞"的2倍
 
-你的回复必须严格按照以下JSON格式：
-{{
-    "thinking": "你的思考过程",
-    "action": "GUESS"或"CHALLENGE",
-    "guess": {{
-        "mode": "飞"或"斋",
-        "count": 数量,
-        "face": 点数
-    }}
-}}
+        你的回复必须严格按照以下JSON格式：
+        {{
+            "thinking": "你的思考过程",
+            "action": "GUESS"或"CHALLENGE",
+            "guess": {{
+                "mode": "飞"或"斋",
+                "count": 数量,
+                "face": 点数
+            }}
+        }}
 
-如果选择检验，guess字段可以为null。
-请确保你的猜测是合法的！"""
+        如果选择检验，guess字段可以为null。
+        请确保你的猜测是合法的！"""
     
     def get_action(self, observation: Dict) -> Action:
         """获取LLM的动作决策"""
@@ -87,12 +87,12 @@ class LLMAgent:
         """将游戏状态转换为自然语言描述"""
         description = f"""当前游戏状态：
 
-你是玩家 {self.agent_id}，共有 {self.num_players} 名玩家。
+        你是玩家 {self.agent_id}，共有 {self.num_players} 名玩家。
 
-你的手牌：{self._format_dice(observation['my_dice_counts'])}
-场上总骰子数：{observation['total_dice_on_table']}
+        你的手牌：{self._format_dice(observation['my_dice_counts'])}
+        场上总骰子数：{observation['total_dice_on_table']}
 
-当前罚分情况："""
+        当前罚分情况："""
         
         # 添加罚分信息
         penalties = observation['player_penalties']
