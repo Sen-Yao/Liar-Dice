@@ -59,6 +59,8 @@ def run_human_vs_ai_mode(args):
                 action = None
             else:
                 # 获取当前agent的动作
+                if agent_id != "player_0":
+                    print(f"{agent_id} 思考中...")
                 agent_obj = agents[agent_id]
                 action = agent_obj.get_action(observation)
                 
