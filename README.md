@@ -111,19 +111,26 @@ python main.py
 
 可选参数：
 
+- `--mode`: 选择 `human` 时，表示作为人类玩家与 AI 对战
 - `--render`: 启用渲染显示游戏过程
-- `--num_players N`: 设置玩家数量（默认为4）
+- `--num_players N`: 设置玩家数量（默认为2）
+- `--num_match N`: 设置局数（默认为1）
 
 使用示例：
 
 ```bash
-# 默认运行，4个玩家，不渲染
+# AI训练模式（默认）
 python main.py
 
-# 启用渲染，显示游戏过程
-python main.py --render
+# 人机对战模式
+python main.py --mode human
 
-# 6个玩家的游戏，启用渲染
-python main.py --render --num_players 6
+# 4人对战（1人类+3AI）
+python main.py --mode human --num_players 4
+
+# 多场比赛
+python main.py --mode human --num_match 3
+
+# 启用详细渲染
+python main.py --mode human --render
 ```
-
