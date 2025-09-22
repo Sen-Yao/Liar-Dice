@@ -11,7 +11,11 @@ class BaseActionSpace(ABC):
     def __init__(self, num_players: int, dice_per_player: int = 5):
         self.num_players = num_players
         self.dice_per_player = dice_per_player
+        # 最大可见骰子总数
         self.max_dice_count = num_players * dice_per_player
+        # 专用动作空间的最小可叫个数：n+1（与首轮规则一致）
+        # 注意：这会缩小离散动作空间大小，从而得到更小的搜索空间
+        self.min_count = num_players + 1
 
         # 动作ID映射：0为Challenge，其余为Guess
         self.challenge_action_id = 0
@@ -74,8 +78,8 @@ class BaseActionSpace(ABC):
         else:
             # 跨模式比较
             if new_guess.mode == '斋' and old_guess.mode == '飞':
-                # 飞 → 斋：新个数 ≥ 旧个数/2
-                return new_guess.count >= (old_guess.count + 1) // 2  # 向上取整
+                # 飞 → 斋：新个数 ≥ 旧个数/2（向上取整），不比较面值
+                return new_guess.count >= (old_guess.count + 1) // 2
             else:  # new_guess.mode == '飞' and old_guess.mode == '斋'
-                # 斋 → 飞：新个数 ≥ 旧个数×2
+                # 斋 → 飞：新个数 ≥ 旧个数×2，不比较面值
                 return new_guess.count >= old_guess.count * 2

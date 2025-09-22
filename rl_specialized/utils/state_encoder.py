@@ -43,12 +43,23 @@ class StateEncoder:
         # 3. 上次猜测特征 (4维)
         last_guess = observation.get("last_guess")
         if last_guess is not None:
+            # 兼容 dict 或 Guess dataclass
+            if isinstance(last_guess, dict):
+                mode_val = last_guess.get("mode")
+                count_val = last_guess.get("count", 0)
+                face_val = last_guess.get("face", 1)
+            else:
+                # 视为 Guess 对象
+                mode_val = getattr(last_guess, "mode", '飞')
+                count_val = getattr(last_guess, "count", 0)
+                face_val = getattr(last_guess, "face", 1)
+
             # 模式编码：飞=0, 斋=1
-            mode_encoding = 0 if last_guess["mode"] == '飞' else 1
+            mode_encoding = 0 if mode_val == '飞' else 1
             features.extend([
                 mode_encoding,
-                last_guess["count"] / self.total_dice,  # 归一化
-                last_guess["face"] / 6.0,               # 归一化
+                float(count_val) / max(1, self.total_dice),  # 归一化
+                float(face_val) / 6.0,                        # 归一化
                 1.0  # 存在有效猜测
             ])
         else:

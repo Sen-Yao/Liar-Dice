@@ -30,18 +30,18 @@ class PlayerSpecificActionSpace(BaseActionSpace):
         self.obj_to_action[challenge] = action_id
         action_id += 1
 
-        # 斋模式猜测动作
+        # 斋模式猜测动作（专用：从 n+1 开始）
         self.zhai_start_id = action_id
-        for count in range(1, self.max_dice_count + 1):
+        for count in range(self.min_count, self.max_dice_count + 1):
             for face in range(1, 7):
                 guess = Guess(mode='斋', count=count, face=face)
                 self.action_to_obj[action_id] = guess
                 self.obj_to_action[guess] = action_id
                 action_id += 1
 
-        # 飞模式猜测动作
+        # 飞模式猜测动作（专用：从 n+1 开始）
         self.fei_start_id = action_id
-        for count in range(1, self.max_dice_count + 1):
+        for count in range(self.min_count, self.max_dice_count + 1):
             for face in range(1, 7):
                 guess = Guess(mode='飞', count=count, face=face)
                 self.action_to_obj[action_id] = guess
@@ -104,10 +104,11 @@ class PlayerSpecificActionSpace(BaseActionSpace):
         return {
             "total_actions": self.total_actions,
             "challenge_actions": 1,
-            "zhai_actions": self.max_dice_count * 6,
-            "fei_actions": self.max_dice_count * 6,
+            "zhai_actions": (self.max_dice_count - self.min_count + 1) * 6,
+            "fei_actions": (self.max_dice_count - self.min_count + 1) * 6,
             "zhai_start_id": self.zhai_start_id,
             "fei_start_id": self.fei_start_id,
+            "min_count": self.min_count,
             "max_dice_count": self.max_dice_count,
             "num_players": self.num_players
         }
