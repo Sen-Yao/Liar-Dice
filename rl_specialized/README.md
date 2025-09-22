@@ -293,3 +293,6 @@ model = PPO(MaskedActorCriticPolicy, env, policy_kwargs=policy_kwargs, ...)
 - 训练指标：
   - 专用训练：对规则对手胜率逐步提升
   - 自博弈：在固定评测池（规则体 + 历史快照）上平均回报上升；最佳权重自动持久化
+
+- 自博弈包装器在开局由对手连续操作时可能提前结束回合；若碰到 RL agent 尚未出手回合即终止的现象，需要在_step_opponents_until_rl_turn_or_done 后额外处理。
+- OpponentPool 现在额外注入了概率型规则对手，依赖 ProbabilisticBasicAgent（agents/basic_agent.py:43-125）；若该类后续再调整，需要同步更新包装器的参数范围。

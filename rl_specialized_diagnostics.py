@@ -16,6 +16,7 @@ import math
 import sys
 import traceback
 from dataclasses import dataclass
+from importlib import util as importlib_util
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
 
@@ -56,9 +57,22 @@ def require_module(module_name: str) -> Any:
         raise SkipCheck(f"module `{module_name}` is not available: {exc}") from exc
 
 
+def ensure_env_stack() -> None:
+    """Verify that the environment dependencies exist before importing heavy modules."""
+
+    missing: List[str] = []
+    for dep in ("gymnasium", "pettingzoo"):
+        if importlib_util.find_spec(dep) is None:
+            missing.append(dep)
+    if missing:
+        raise SkipCheck("missing dependencies: " + ", ".join(missing))
+
+
 def check_imports() -> str:
     numpy = require_module("numpy")
     rl_specialized = require_module("rl_specialized")
+
+    ensure_env_stack()
 
     from rl_specialized.action_spaces import (
         get_2_player_action_space,
@@ -79,6 +93,8 @@ def check_imports() -> str:
 
 
 def check_action_space_sizes() -> str:
+    ensure_env_stack()
+
     from rl_specialized.action_spaces import (
         get_2_player_action_space,
         get_3_player_action_space,
@@ -108,6 +124,8 @@ def check_action_space_sizes() -> str:
 
 
 def check_round_trip() -> str:
+    ensure_env_stack()
+
     from rl_specialized.action_spaces import get_2_player_action_space
 
     space = get_2_player_action_space()
@@ -125,6 +143,8 @@ def check_round_trip() -> str:
 
 
 def check_mask_alignment() -> str:
+    ensure_env_stack()
+
     env_module = require_module("env")
     from rl_specialized.action_spaces import get_3_player_action_space
 
@@ -152,6 +172,8 @@ def check_mask_alignment() -> str:
 
 
 def check_state_encoder() -> str:
+    ensure_env_stack()
+
     from rl_specialized.utils import create_state_encoder
 
     encoder = create_state_encoder(num_players=4)
@@ -173,6 +195,8 @@ def check_state_encoder() -> str:
 
 
 def check_specialized_agent_policy() -> str:
+    ensure_env_stack()
+
     from rl_specialized.agents import SpecializedAgent
 
     agent = SpecializedAgent(num_players=2)
@@ -193,8 +217,7 @@ def check_specialized_agent_policy() -> str:
 
 
 def check_single_agent_env_rollout() -> str:
-    require_module("gymnasium")
-    require_module("pettingzoo")
+    ensure_env_stack()
 
     from rl_specialized.training.env_wrappers import LiarDiceSingleAgentEnv
 
