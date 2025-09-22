@@ -4,6 +4,43 @@
 
 这个模块实现了针对不同玩家数量（2-6人）的专用强化学习模型。与通用模型不同，专用模型为每种玩家配置训练独立的神经网络，以获得最优的性能表现。
 
+## 🚂 训练方案（优先推荐）
+
+### 自博弈训练（混合对手池，简化实现）
+
+- 思路：RL 控制 player_0，对手来自“对手池”（多参数规则体 + 历史策略快照）。训练中按进度线性降低规则体占比，定期将当前策略快照加入对手池。
+- 文件：`rl_specialized/training/env_wrappers.py`（自博弈环境与对手池）+ `rl_specialized/training/train_selfplay.py`（训练脚本）。
+
+运行：
+
+```bash
+python -m rl_specialized.training.train_selfplay --num_players 2 --timesteps 2000000 --snapshot_freq 200000
+```
+
+要点：
+- 对手池初始包含多参数规则对手（起手面值∈{3,4,5}，挑战阈值偏移∈{2,3,4,5}）。
+- 规则体占比从 0.8 → 0.2（线性随训练进度下降）。
+- 每 `snapshot_freq` 步将当前策略保存并加入对手池（推断在 CPU 上进行，不占用训练设备显存）。
+- 观测与动作掩码与专用训练一致：`{'obs': state_vec, 'action_mask': mask}`。
+- 模型保存：
+  - 快照：`runs/rl_selfplay/snapshots/snapshot_step_*.zip`
+  - 最优：`runs/rl_selfplay/best_model/best_model.zip`
+
+#### 奖励潜在塑形（默认开启）
+
+- 目的：在不改变最优策略的前提下，提供更密集的学习信号，提升稳定性与收敛速度。
+- 形式：在自博弈环境中加入势函数塑形项
+
+  `F = β · (γ · Φ(s') − Φ(s))`
+
+  其中 Φ(s) 估计当前最后叫点相对于“可信度”的差距：
+  - 飞：成功概率 p(face 或 1) = 2/6；斋：p(face) = 1/6
+  - 期望总成功 E = 自己手牌成功数 + 未知骰子数 × p
+  - Φ(s) = clip((E − 最后叫点count)/总骰子数, −1, 1)
+
+- 参数：在 `train_selfplay.py` 中默认 `β=0.05`，`γ` 与 PPO 的 `gamma` 保持一致（默认 0.99）。
+- 关闭方式：如需关闭，在创建 `LiarDiceSelfPlayEnv` 时将 `dense_shaping=False`。
+
 ## 🏗️ 架构设计
 
 ### 核心思想
@@ -11,7 +48,7 @@
 - **高效训练**：动作空间精确匹配游戏配置，减少无效动作
 - **性能最优**：针对特定场景深度优化，避免通用模型的复杂性
 
-### 目录结构
+### 目录结构（已实现）
 
 ```
 rl_specialized/
@@ -21,13 +58,16 @@ rl_specialized/
 │   └── player_specific.py # 专用模型动作空间实现
 ├── agents/                # RL智能体实现
 │   ├── __init__.py
-│   └── specialized_agent.py (待实现)
+│   └── specialized_agent.py
 ├── networks/              # 神经网络结构
 │   ├── __init__.py
-│   └── policy_network.py (待实现)
+│   └── policy_network.py
 ├── training/              # 训练脚本
 │   ├── __init__.py
-│   └── train_specialized.py (待实现)
+│   ├── env_wrappers.py    # 单智能体包装 + 自博弈对手池
+│   ├── masked_policy.py   # 动作掩码策略（logits 层屏蔽非法动作）
+│   ├── train_specialized.py # 专用方案训练（规则对手）
+│   └── train_selfplay.py  # 自博弈训练（混合对手池 + 快照）
 ├── utils/                 # 工具函数
 │   ├── __init__.py
 │   └── state_encoder.py  # 状态编码器
@@ -222,7 +262,7 @@ for action_id in range(len(mask)):
 ```bash
 pip install "stable-baselines3[extra]" torch gymnasium tensorboard
 
-# 训练（自动选择 cuda/mps/cpu）
+# 训练（自动选择 cuda/mps/cpu；最佳模型保存在 runs/rl_specialized/best_model）
 python -m rl_specialized.training.train_specialized --num_players 2 --timesteps 200000
 
 # TensorBoard
@@ -233,6 +273,9 @@ tensorboard --logdir runs/rl_specialized
 - 单智能体 Gym 包装（RL 控制 player_0，其余为 BasicRuleAgent）
 - 自定义策略 Mask：在 logits 处屏蔽非法动作（动作掩码）
 - 特征提取器采用 `MaskedStateFeatureExtractor`，默认 `features_dim=128`
+ - 设备自动选择：cuda > mps > cpu（可通过 `--device` 指定）
+ - 专用动作空间：包装器默认启用 `use_specialized_action_space=True`
+ - 掩码在训练/采样一致生效：非法动作概率恒为 0
 
 如需自定义网络宽度，可在 `train_specialized.py` 中调整：
 
@@ -243,34 +286,10 @@ policy_kwargs = make_default_policy_kwargs(PolicyNetConfig(features_dim=128, pi_
 model = PPO(MaskedActorCriticPolicy, env, policy_kwargs=policy_kwargs, ...)
 ```
 
-### 自博弈训练（混合对手池，简化实现）
 
-- 思路：RL 控制 player_0，对手来自“对手池”（多参数规则体 + 历史策略快照）。训练中按进度线性降低规则体占比，定期将当前策略快照加入对手池。
-- 文件：`rl_specialized/training/env_wrappers.py`（自博弈环境与对手池）+ `rl_specialized/training/train_selfplay.py`（训练脚本）。
-
-运行：
-
-```bash
-python -m rl_specialized.training.train_selfplay --num_players 2 --timesteps 2000000 --snapshot_freq 200000
-```
-
-要点：
-- 对手池初始包含多参数规则对手（起手面值∈{3,4,5}，挑战阈值偏移∈{2,3,4,5}）。
-- 规则体占比从 0.8 → 0.2（线性随训练进度下降）。
-- 每 `snapshot_freq` 步将当前策略保存并加入对手池（推断在 CPU 上进行，不占用训练设备显存）。
-- 观测与动作掩码与专用训练一致：`{'obs': state_vec, 'action_mask': mask}`。
-
-#### 奖励潜在塑形（默认开启）
-
-- 目的：在不改变最优策略的前提下，提供更密集的学习信号，提升稳定性与收敛速度。
-- 形式：在自博弈环境中加入势函数塑形项
-
-  `F = β · (γ · Φ(s') − Φ(s))`
-
-  其中 Φ(s) 估计当前最后叫点相对于“可信度”的差距：
-  - 飞：成功概率 p(face 或 1) = 2/6；斋：p(face) = 1/6
-  - 期望总成功 E = 自己手牌成功数 + 未知骰子数 × p
-  - Φ(s) = clip((E − 最后叫点count)/总骰子数, −1, 1)
-
-- 参数：在 `train_selfplay.py` 中默认 `β=0.05`，`γ` 与 PPO 的 `gamma` 保持一致（默认 0.99）。
-- 关闭方式：如需关闭，在创建 `LiarDiceSelfPlayEnv` 时将 `dense_shaping=False`。
+### 评估与验收
+- 双向映射一致：ID ↔ 动作对象往返一致
+- 掩码正确性：非法动作概率恒为 0；首轮禁止 challenge
+- 训练指标：
+  - 专用训练：对规则对手胜率逐步提升
+  - 自博弈：在固定评测池（规则体 + 历史快照）上平均回报上升；最佳权重自动持久化
