@@ -14,10 +14,11 @@ class PlayerSpecificActionSpace(BaseActionSpace):
     def _build_action_mapping(self):
         """构建动作ID到动作对象的映射
 
-        动作空间设计：
+        动作空间设计（专用：计数从 min_count = num_players + 1 开始）：
         - Challenge: action_id = 0
-        - 斋模式猜测: action_id = 1 + (count-1)*6 + (face-1)
-        - 飞模式猜测: action_id = 1 + max_zhai_actions + (count-1)*6 + (face-1)
+        - 斋模式猜测: action_id = 1 + (count - min_count) * 6 + (face - 1)
+        - 飞模式猜测: action_id = 1 + zhai_actions + (count - min_count) * 6 + (face - 1)
+        其中 zhai_actions = (max_dice_count - min_count + 1) * 6
         """
         self.action_to_obj = {}
         self.obj_to_action = {}
