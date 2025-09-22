@@ -80,12 +80,16 @@ class SelfPlayTrainer:
         if self.cfg.device is None:
             self.cfg.device = auto_select_device()
 
-        # 构建对手池：初始化若干规则变体
+        # 构建对手池：初始化若干规则变体（基础 + 概率型）
         self.pool = OpponentPool(num_players=cfg.num_players, rule_ratio=cfg.rule_ratio_start)
-        # 挑战阈值偏移 2..5，起手面值 3/4/5
+        # 基础规则对手：挑战阈值偏移 2..5，起手面值 3/4/5
         for off in [2, 3, 4, 5]:
             for face in [3, 4, 5]:
                 self.pool.add_rule(start_face=face, challenge_offset=off)
+        # 概率型规则对手：不同阈值组合，提升对手多样性
+        for tc in [0.20, 0.25, 0.30]:
+            for tr in [0.55, 0.60, 0.65]:
+                self.pool.add_prob_rule(theta_challenge=tc, target_raise=tr, max_extra_raise=2)
 
         def make_env():
             # 默认开启潜在塑形：β=0.05，γ同 PPO 配置（cfg.gamma）
