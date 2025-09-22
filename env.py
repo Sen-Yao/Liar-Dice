@@ -341,4 +341,45 @@ class LiarDiceEnv(AECEnv):
         # into a single Discrete space with an action mask.
         return gymnasium.spaces.Discrete(1 + (2 * self.total_dice * 6))
 
+    def action_to_object(self, action_id: int) -> Action:
+        """将动作ID转换为动作对象 - 用于RL训练"""
+        if action_id == 0:
+            return Challenge()
+
+        action_id -= 1  # 减去Challenge的ID
+
+        # 计算每种模式的动作数量
+        actions_per_mode = self.total_dice * 6
+
+        if action_id < actions_per_mode:
+            # 斋模式动作
+            count = (action_id // 6) + 1
+            face = (action_id % 6) + 1
+            return Guess(mode='斋', count=count, face=face)
+        else:
+            # 飞模式动作
+            action_id -= actions_per_mode
+            count = (action_id // 6) + 1
+            face = (action_id % 6) + 1
+            return Guess(mode='飞', count=count, face=face)
+
+    def get_action_mask(self, observation: Dict) -> np.ndarray:
+        """获取合法动作掩码 - 用于RL训练"""
+        total_actions = 1 + (2 * self.total_dice * 6)
+        mask = np.zeros(total_actions, dtype=bool)
+
+        last_guess = observation.get("last_guess")
+
+        # Challenge总是可以执行（如果不是首轮）
+        if last_guess is not None:
+            mask[0] = True
+
+        # 检查所有猜测动作的合法性
+        for action_id in range(1, total_actions):
+            guess = self.action_to_object(action_id)
+            if self._is_legal(guess):
+                mask[action_id] = True
+
+        return mask
+
 # --- Example Usage ---
