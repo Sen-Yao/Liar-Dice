@@ -3,7 +3,7 @@ import numpy as np
 from typing import Dict, Tuple, Optional, Any, List
 
 from env import LiarDiceEnv, Guess, Challenge
-from agents.basic_agent import BasicRuleAgent
+from agents.basic_agent import BasicRuleAgent, ProbabilisticBasicAgent
 from rl_specialized.utils.state_encoder import create_state_encoder
 
 # 为了保持实现简单，将自博弈相关的对手与对手池也放在本文件中
@@ -199,11 +199,15 @@ class OpponentPool:
     def __init__(self, num_players: int, rule_ratio: float = 1.0):
         self.num_players = num_players
         self.rule_ratio = float(np.clip(rule_ratio, 0.0, 1.0))
-        self.rules: List[BasicRuleOpponent] = []
+        # 规则类对手（含 BasicRuleOpponent 与 ProbabilisticRuleOpponent）
+        self.rules: List[Any] = []
         self.policies: List[PolicyOpponent] = []
 
     def add_rule(self, start_face: int = 4, challenge_offset: int = 3):
         self.rules.append(BasicRuleOpponent(self.num_players, start_face, challenge_offset))
+
+    def add_prob_rule(self, theta_challenge: float = 0.25, target_raise: float = 0.60, max_extra_raise: int = 2):
+        self.rules.append(ProbabilisticRuleOpponent(self.num_players, theta_challenge, target_raise, max_extra_raise))
 
     def add_policy(self, model_path: str, device: str = "cpu"):
         self.policies.append(PolicyOpponent(model_path, device=device))
@@ -220,6 +224,22 @@ class OpponentPool:
             return np.random.choice(self.rules)
         # 策略对手
         return np.random.choice(self.policies)
+
+
+class ProbabilisticRuleOpponent:
+    """概率型规则对手：封装 ProbabilisticBasicAgent 以便用于对手池"""
+
+    def __init__(self, num_players: int, theta_challenge: float = 0.25, target_raise: float = 0.60, max_extra_raise: int = 2):
+        self.agent = ProbabilisticBasicAgent(
+            agent_id="opp",
+            num_players=num_players,
+            theta_challenge=theta_challenge,
+            target_raise=target_raise,
+            max_extra_raise=max_extra_raise,
+        )
+
+    def get_action(self, observation: Dict) -> Any:
+        return self.agent.get_action(observation)
 
 
 class LiarDiceSelfPlayEnv(gym.Env):
