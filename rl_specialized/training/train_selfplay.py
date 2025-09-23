@@ -53,9 +53,9 @@ class SelfPlayConfig:
     device: Optional[str] = None
     tensorboard_log: Optional[str] = "runs/rl_selfplay"
     eval_episodes: int = 20
-    snapshot_freq: int = 10_000
+    snapshot_freq: int = 2_000
     rule_ratio_start: float = 0.8
-    rule_ratio_end: float = 0.05
+    rule_ratio_end: float = 0.02
 
 
 def linear_schedule(start: float, end: float) -> Callable[[float], float]:
@@ -229,7 +229,7 @@ def main():
     parser.add_argument("--num_players", type=int, default=2)
     parser.add_argument("--dice_per_player", type=int, default=5)
     parser.add_argument("--timesteps", type=int, default=2_000_000)
-    parser.add_argument("--snapshot_freq", type=int, default=200_000)
+    parser.add_argument("--snapshot_freq", type=int, default=20_000)
     parser.add_argument("--device", type=str, default=None, choices=["cuda", "mps", "cpu", None])
     parser.add_argument("--logdir", type=str, default="runs/rl_selfplay")
     parser.add_argument("--seed", type=int, default=42)
