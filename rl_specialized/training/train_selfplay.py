@@ -52,7 +52,7 @@ class SelfPlayConfig:
     seed: Optional[int] = 42
     device: Optional[str] = None
     tensorboard_log: Optional[str] = "runs/rl_selfplay"
-    eval_episodes: int = 50
+    eval_episodes: int = 20
     snapshot_freq: int = 10_000
     rule_ratio_start: float = 0.8
     rule_ratio_end: float = 0.05
@@ -150,37 +150,13 @@ class SelfPlayTrainer:
             env = make_env()
             return Monitor(env)  # 添加Monitor包装解决警告
 
-        # --- 构建独立的评测对手池与环境（固定评测池，不加入策略快照） ---
-        self.eval_pool = OpponentPool(num_players=cfg.num_players, rule_ratio=1.0)
-        # 规则对手：与训练池同分布，但不包含策略快照，避免评测分布随训练变化
-        for off in [2, 3, 4, 5]:
-            for face in [3, 4, 5]:
-                self.eval_pool.add_rule(start_face=face, challenge_offset=off)
-        for tc in [0.20, 0.25, 0.30]:
-            for tr in [0.55, 0.60, 0.65]:
-                self.eval_pool.add_prob_rule(theta_challenge=tc, target_raise=tr, max_extra_raise=2)
-
-        def make_eval_env():
-            return LiarDiceSelfPlayEnv(
-                pool=self.eval_pool,
-                dice_per_player=cfg.dice_per_player,
-                dense_shaping=True,
-                shaping_beta=0.05,
-                shaping_gamma=cfg.gamma,
-                show_opponent_info=False,
-            )
-
-        def make_eval_env_with_monitor():
-            env = make_eval_env()
-            return Monitor(env)
-
         # 归一化包装：训练更新统计，评估仅使用统计不更新
         self.train_env = VecNormalize(
             DummyVecEnv([make_env_with_monitor]), norm_obs=True, norm_reward=True, clip_obs=10.0,
             norm_obs_keys=["obs"]  # 只归一化 obs 部分，不归一化 action_mask
         )
         self.eval_env = VecNormalize(
-            DummyVecEnv([make_eval_env_with_monitor]), norm_obs=True, norm_reward=False, clip_obs=10.0,
+            DummyVecEnv([make_env_with_monitor]), norm_obs=True, norm_reward=False, clip_obs=10.0,
             norm_obs_keys=["obs"]  # 只归一化 obs 部分，不归一化 action_mask
         )
         # 共享统计并关闭评估期统计更新
@@ -225,7 +201,7 @@ class SelfPlayTrainer:
         sp_cb = SelfPlayCallback(pool=self.pool, cfg=self.cfg, save_dir=save_dir)
         eval_cb = EvalCallback(self.eval_env, best_model_save_path=os.path.join(self.cfg.tensorboard_log or "runs", "best_model"),
                                log_path=self.cfg.tensorboard_log, eval_freq=max(2000, self.cfg.n_steps),  # 更频繁的评估
-                               deterministic=True, render=False, n_eval_episodes=self.cfg.eval_episodes)
+                               deterministic=False, render=False, n_eval_episodes=self.cfg.eval_episodes)
 
         print("开始 PPO 训练...")
         self.model.learn(total_timesteps=self.cfg.total_timesteps, callback=[sp_cb, eval_cb])
@@ -240,7 +216,7 @@ class SelfPlayTrainer:
             obs = env.reset()
             done = False
             while not done:
-                action, _ = self.model.predict(obs, deterministic=True)
+                action, _ = self.model.predict(obs, deterministic=False)
                 obs, reward, done, info = env.step(action)
                 done = bool(done[0])
                 total_reward += float(reward[0])
@@ -253,7 +229,7 @@ def main():
     parser.add_argument("--num_players", type=int, default=2)
     parser.add_argument("--dice_per_player", type=int, default=5)
     parser.add_argument("--timesteps", type=int, default=2_000_000)
-    parser.add_argument("--snapshot_freq", type=int, default=50_000)
+    parser.add_argument("--snapshot_freq", type=int, default=200_000)
     parser.add_argument("--device", type=str, default=None, choices=["cuda", "mps", "cpu", None])
     parser.add_argument("--logdir", type=str, default="runs/rl_selfplay")
     parser.add_argument("--seed", type=int, default=42)
