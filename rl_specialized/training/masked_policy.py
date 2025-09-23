@@ -16,16 +16,14 @@ class MaskedActorCriticPolicy(ActorCriticPolicy):
     def __init__(self, *args, **kwargs):
         # 默认使用我们在 networks 中定义的特征提取器
         kwargs.setdefault("features_extractor_class", MaskedStateFeatureExtractor)
-        fe_kwargs = kwargs.get("features_extractor_kwargs", {})
-        fe_kwargs["policy_ref"] = self  # 让提取器将 mask 注入到本策略
-        kwargs["features_extractor_kwargs"] = fe_kwargs
+        # No need to pass policy reference anymore
         super().__init__(*args, **kwargs)
 
     def _get_action_dist_from_latent(self, latent_pi: th.Tensor) -> Any:
         # 标准 logits
         action_logits = self.action_net(latent_pi)
-        # 应用 mask（如可用）
-        mask: Optional[th.Tensor] = getattr(self, "_last_action_mask", None)
+        # 从特征提取器获取 mask
+        mask: Optional[th.Tensor] = getattr(self.features_extractor, "_current_action_mask", None)
         if mask is not None:
             # 广播到相同 batch 维度
             if mask.shape != action_logits.shape:

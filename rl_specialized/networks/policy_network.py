@@ -1,3 +1,4 @@
+import weakref
 from dataclasses import dataclass
 from typing import Dict, Optional
 
@@ -39,7 +40,8 @@ class MaskedStateFeatureExtractor(BaseFeaturesExtractor):
     def __init__(self, observation_space: gym.spaces.Dict, features_dim: int = 128, policy_ref: Optional[nn.Module] = None):
         assert isinstance(observation_space, gym.spaces.Dict)
         super().__init__(observation_space, features_dim)
-        self.policy_ref = policy_ref
+        # Don't store policy reference to avoid serialization issues
+        # Instead, we'll use a different approach for passing masks
         obs_space = observation_space["obs"]
         assert isinstance(obs_space, gym.spaces.Box)
         input_dim = int(obs_space.shape[0])
@@ -52,15 +54,16 @@ class MaskedStateFeatureExtractor(BaseFeaturesExtractor):
         self.out = nn.Sequential(nn.SiLU(), nn.Linear(hidden, features_dim))
 
     def forward(self, observations: Dict[str, th.Tensor]) -> th.Tensor:
-        # 注入 mask 到 policy（供 logits 层屏蔽）
-        if self.policy_ref is not None and "action_mask" in observations:
+        # Store action mask for later use by policy
+        if "action_mask" in observations:
             mask = observations["action_mask"].to(dtype=th.bool)
-            setattr(self.policy_ref, "_last_action_mask", mask)
+            # Store the mask as a module attribute for the policy to access
+            self._current_action_mask = mask
 
         x = observations["obs"]
         x = self.norm(x)
         x = self.inp(x)
-        x = th.silu(x)
+        x = nn.functional.silu(x)
         x = self.block1(x)
         x = self.block2(x)
         x = self.out(x)

@@ -152,6 +152,10 @@ class BasicRuleOpponent:
         self.num_players = num_players
         self.start_face = int(np.clip(start_face, 2, 6))
         self.challenge_threshold = self.num_players + int(challenge_offset)
+        self.challenge_offset = int(challenge_offset)
+
+    def get_description(self) -> str:
+        return f"基础规则(起手{self.start_face},阈值+{self.challenge_offset})"
 
     def get_action(self, observation: Dict) -> Any:
         # 首轮：飞模式，count = n+1，face = 自定义起手面值
@@ -187,6 +191,12 @@ class PolicyOpponent:
         if PPO is None:
             raise RuntimeError("stable-baselines3 未安装，无法加载策略对手")
         self.model = PPO.load(model_path, device=device)
+        self.model_path = model_path
+
+    def get_description(self) -> str:
+        import os
+        filename = os.path.basename(self.model_path)
+        return f"策略快照({filename})"
 
     def predict_action_id(self, obs_dict: Dict) -> int:
         action, _ = self.model.predict(obs_dict, deterministic=True)
@@ -202,6 +212,9 @@ class OpponentPool:
         # 规则类对手（含 BasicRuleOpponent 与 ProbabilisticRuleOpponent）
         self.rules: List[Any] = []
         self.policies: List[PolicyOpponent] = []
+        # 统计信息
+        self.usage_stats = {'basic_rule': 0, 'prob_rule': 0, 'policy': 0}
+        self.last_sampled_opponents = []
 
     def add_rule(self, start_face: int = 4, challenge_offset: int = 3):
         self.rules.append(BasicRuleOpponent(self.num_players, start_face, challenge_offset))
@@ -220,16 +233,47 @@ class OpponentPool:
             # 规则对手
             if not self.rules:
                 # 若池为空，回退到默认规则对手
-                return BasicRuleOpponent(self.num_players)
-            return np.random.choice(self.rules)
+                opponent = BasicRuleOpponent(self.num_players)
+                self.usage_stats['basic_rule'] += 1
+                return opponent
+            opponent = np.random.choice(self.rules)
+            # 统计类型
+            if isinstance(opponent, BasicRuleOpponent):
+                self.usage_stats['basic_rule'] += 1
+            elif isinstance(opponent, ProbabilisticRuleOpponent):
+                self.usage_stats['prob_rule'] += 1
+            return opponent
         # 策略对手
-        return np.random.choice(self.policies)
+        opponent = np.random.choice(self.policies)
+        self.usage_stats['policy'] += 1
+        return opponent
+
+    def get_usage_stats(self) -> Dict[str, float]:
+        """获取对手使用统计数据（百分比）"""
+        total = sum(self.usage_stats.values())
+        if total == 0:
+            return {'basic_rule': 0.0, 'prob_rule': 0.0, 'policy': 0.0}
+        return {k: (v / total) * 100 for k, v in self.usage_stats.items()}
+
+    def get_pool_summary(self) -> str:
+        """获取对手池概要信息"""
+        basic_count = sum(1 for op in self.rules if isinstance(op, BasicRuleOpponent))
+        prob_count = sum(1 for op in self.rules if isinstance(op, ProbabilisticRuleOpponent))
+        policy_count = len(self.policies)
+        return f"基础规则:{basic_count} | 概率规则:{prob_count} | 策略快照:{policy_count}"
+
+    def reset_stats(self):
+        """重置统计信息"""
+        self.usage_stats = {'basic_rule': 0, 'prob_rule': 0, 'policy': 0}
 
 
 class ProbabilisticRuleOpponent:
     """概率型规则对手：封装 ProbabilisticBasicAgent 以便用于对手池"""
 
     def __init__(self, num_players: int, theta_challenge: float = 0.25, target_raise: float = 0.60, max_extra_raise: int = 2):
+        self.theta_challenge = theta_challenge
+        self.target_raise = target_raise
+        self.max_extra_raise = max_extra_raise
         self.agent = ProbabilisticBasicAgent(
             agent_id="opp",
             num_players=num_players,
@@ -237,6 +281,9 @@ class ProbabilisticRuleOpponent:
             target_raise=target_raise,
             max_extra_raise=max_extra_raise,
         )
+
+    def get_description(self) -> str:
+        return f"概率规则(挑战{self.theta_challenge:.2f},加注{self.target_raise:.2f})"
 
     def get_action(self, observation: Dict) -> Any:
         return self.agent.get_action(observation)
@@ -259,6 +306,7 @@ class LiarDiceSelfPlayEnv(gym.Env):
         dense_shaping: bool = True,
         shaping_beta: float = 0.05,
         shaping_gamma: float = 0.99,
+        show_opponent_info: bool = False,
     ):
         super().__init__()
         assert pool.num_players >= 2
@@ -270,6 +318,7 @@ class LiarDiceSelfPlayEnv(gym.Env):
         self.dense_shaping = dense_shaping
         self.shaping_beta = float(shaping_beta)
         self.shaping_gamma = float(shaping_gamma)
+        self._show_opponent_info = show_opponent_info
 
         # 专用动作空间尺寸（与 LiarDiceSingleAgentEnv 相同计算）
         self._min_count = self.num_players + 1
@@ -373,10 +422,20 @@ class LiarDiceSelfPlayEnv(gym.Env):
 
         # 为每个非RL座位从对手池采样一个对手
         self._seat_opponents = {}
+        opponent_descriptions = []
         for i in range(self.num_players):
             aid = f"player_{i}"
             if aid != self._rl_agent_id:
-                self._seat_opponents[aid] = self.pool.sample()
+                opponent = self.pool.sample()
+                self._seat_opponents[aid] = opponent
+                if hasattr(opponent, 'get_description'):
+                    opponent_descriptions.append(opponent.get_description())
+                else:
+                    opponent_descriptions.append("未知对手")
+
+        # 输出对手信息（仅在需要时）
+        if len(opponent_descriptions) > 0 and hasattr(self, '_show_opponent_info') and self._show_opponent_info:
+            print(f"对手配置: {', '.join(opponent_descriptions)}")
 
         # 如开局不是RL，推进到RL或结束
         self._step_opponents_until_rl_turn_or_done()

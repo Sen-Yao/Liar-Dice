@@ -1,6 +1,12 @@
 import os
+import sys
 from dataclasses import dataclass
 from typing import Optional
+
+# 添加项目根目录到 Python 路径
+project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
+if project_root not in sys.path:
+    sys.path.insert(0, project_root)
 
 import numpy as np
 import torch as th
@@ -28,11 +34,11 @@ def auto_select_device() -> str:
 class SelfPlayConfig:
     num_players: int = 2
     dice_per_player: int = 5
-    total_timesteps: int = 2_000_000
+    total_timesteps: int = 50_000  # 减少总步数以避免超时
     learning_rate: float = 3e-4
     policy_hidden_size: int = 128
-    n_steps: int = 1024
-    batch_size: int = 128
+    n_steps: int = 512  # 减少步数以加快训练
+    batch_size: int = 64  # 减少批次大小
     gamma: float = 0.99
     gae_lambda: float = 0.95
     clip_range: float = 0.2
@@ -41,8 +47,8 @@ class SelfPlayConfig:
     seed: Optional[int] = 42
     device: Optional[str] = None
     tensorboard_log: Optional[str] = "runs/rl_selfplay"
-    eval_episodes: int = 10
-    snapshot_freq: int = 200_000
+    eval_episodes: int = 5  # 减少评估回合数
+    snapshot_freq: int = 10_000  # 减少快照频率
     rule_ratio_start: float = 0.8
     rule_ratio_end: float = 0.2
 
@@ -63,13 +69,25 @@ class SelfPlayCallback(BaseCallback):
         ratio = (1 - progress) * self.cfg.rule_ratio_start + progress * self.cfg.rule_ratio_end
         self.pool.set_rule_ratio(ratio)
 
+        # 每1000步打印一次进度和对手信息
+        if self.num_timesteps % 1000 == 0:
+            stats = self.pool.get_usage_stats()
+            pool_summary = self.pool.get_pool_summary()
+            print(f"训练步数: {self.num_timesteps}/{self.cfg.total_timesteps}, 规则对手占比: {ratio:.2f}, 进度: {progress*100:.1f}%")
+            print(f"对手池: {pool_summary}")
+            if sum(stats.values()) > 0:
+                print(f"使用统计: 基础规则{stats['basic_rule']:.0f}% | 概率规则{stats['prob_rule']:.0f}% | 策略快照{stats['policy']:.0f}%")
+            print("-" * 50)
+
         # 到达快照点：保存并注册为对手
         if self.num_timesteps >= self._next_snapshot:
+            print(f"保存快照: {self.num_timesteps} 步")
             os.makedirs(self.save_dir, exist_ok=True)
             path = os.path.join(self.save_dir, f"snapshot_step_{self.num_timesteps}.zip")
             self.model.save(path)
             # 策略对手推断放CPU
             self.pool.add_policy(path, device="cpu")
+            print(f"已保存快照: {path}")
             self._next_snapshot += self.cfg.snapshot_freq
         return True
 
@@ -99,10 +117,17 @@ class SelfPlayTrainer:
                 dense_shaping=True,
                 shaping_beta=0.05,
                 shaping_gamma=cfg.gamma,
+                show_opponent_info=False,  # 在训练时不显示详细对手信息
             )
 
-        self.train_env = DummyVecEnv([make_env])
-        self.eval_env = DummyVecEnv([make_env])
+        from stable_baselines3.common.monitor import Monitor
+
+        def make_env_with_monitor():
+            env = make_env()
+            return Monitor(env)  # 添加Monitor包装解决警告
+
+        self.train_env = DummyVecEnv([make_env_with_monitor])
+        self.eval_env = DummyVecEnv([make_env_with_monitor])
 
         policy_kwargs = make_default_policy_kwargs(PolicyNetConfig(
             features_dim=cfg.policy_hidden_size,
@@ -125,15 +150,26 @@ class SelfPlayTrainer:
             policy_kwargs=policy_kwargs,
             seed=cfg.seed,
             device=cfg.device,
+            verbose=1,  # 添加详细输出
         )
 
     def train(self):
+        print(f"开始训练 - 总步数: {self.cfg.total_timesteps}, 玩家数: {self.cfg.num_players}, 设备: {self.cfg.device}")
+        print(f"网络配置 - 隐藏层大小: {self.cfg.policy_hidden_size}, 学习率: {self.cfg.learning_rate}")
+        print(f"PPO参数 - n_steps: {self.cfg.n_steps}, batch_size: {self.cfg.batch_size}")
+        print(f"对手池初始配置: {self.pool.get_pool_summary()}")
+        print(f"规则对手占比: {self.cfg.rule_ratio_start:.1f} → {self.cfg.rule_ratio_end:.1f}")
+        print("-" * 60)
+
         save_dir = os.path.join(self.cfg.tensorboard_log or "runs", "snapshots")
         sp_cb = SelfPlayCallback(pool=self.pool, cfg=self.cfg, save_dir=save_dir)
         eval_cb = EvalCallback(self.eval_env, best_model_save_path=os.path.join(self.cfg.tensorboard_log or "runs", "best_model"),
-                               log_path=self.cfg.tensorboard_log, eval_freq=max(10000, self.cfg.n_steps),
+                               log_path=self.cfg.tensorboard_log, eval_freq=max(2000, self.cfg.n_steps),  # 更频繁的评估
                                deterministic=False, render=False, n_eval_episodes=self.cfg.eval_episodes)
-        self.model.learn(total_timesteps=self.cfg.total_timesteps, callback=[sp_cb, eval_cb])
+
+        print("开始 PPO 训练...")
+        self.model.learn(total_timesteps=self.cfg.total_timesteps, callback=[sp_cb, eval_cb], progress_bar=True)
+        print("训练完成!")
 
     def evaluate(self, n_episodes: Optional[int] = None) -> float:
         if n_episodes is None:
