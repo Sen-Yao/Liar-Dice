@@ -168,7 +168,7 @@ class SelfPlayTrainer:
                                deterministic=False, render=False, n_eval_episodes=self.cfg.eval_episodes)
 
         print("开始 PPO 训练...")
-        self.model.learn(total_timesteps=self.cfg.total_timesteps, callback=[sp_cb, eval_cb], progress_bar=True)
+        self.model.learn(total_timesteps=self.cfg.total_timesteps, callback=[sp_cb, eval_cb])
         print("训练完成!")
 
     def evaluate(self, n_episodes: Optional[int] = None) -> float:
