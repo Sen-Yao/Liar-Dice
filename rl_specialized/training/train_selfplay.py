@@ -1,7 +1,7 @@
 import os
 import sys
 from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, Callable
 
 # 添加项目根目录到 Python 路径
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
@@ -12,7 +12,7 @@ import numpy as np
 import torch as th
 from stable_baselines3 import PPO
 from stable_baselines3.common.callbacks import BaseCallback, EvalCallback
-from stable_baselines3.common.vec_env import DummyVecEnv
+from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 
 from rl_specialized.training.env_wrappers import OpponentPool, LiarDiceSelfPlayEnv
 from rl_specialized.training.masked_policy import MaskedActorCriticPolicy
@@ -34,23 +34,39 @@ def auto_select_device() -> str:
 class SelfPlayConfig:
     num_players: int = 2
     dice_per_player: int = 5
-    total_timesteps: int = 50_000  # 减少总步数以避免超时
+    total_timesteps: int = 50_000  # 可通过命令行覆盖
+    # 学习率与更新规模优化
     learning_rate: float = 3e-4
-    policy_hidden_size: int = 128
-    n_steps: int = 512  # 减少步数以加快训练
-    batch_size: int = 64  # 减少批次大小
+    learning_rate_end: float = 5e-5
+    policy_hidden_size: int = 256
+    n_steps: int = 2048
+    batch_size: int = 256
     gamma: float = 0.99
-    gae_lambda: float = 0.95
+    gae_lambda: float = 0.97
     clip_range: float = 0.2
-    ent_coef: float = 0.01
-    vf_coef: float = 0.5
+    clip_range_end: float = 0.1
+    ent_coef_start: float = 0.01
+    ent_coef_end: float = 0.002
+    vf_coef: float = 0.8
+    target_kl: float = 0.03
     seed: Optional[int] = 42
     device: Optional[str] = None
     tensorboard_log: Optional[str] = "runs/rl_selfplay"
-    eval_episodes: int = 5  # 减少评估回合数
-    snapshot_freq: int = 10_000  # 减少快照频率
+    eval_episodes: int = 20
+    snapshot_freq: int = 10_000
     rule_ratio_start: float = 0.8
-    rule_ratio_end: float = 0.2
+    rule_ratio_end: float = 0.05
+
+
+def linear_schedule(start: float, end: float) -> Callable[[float], float]:
+    """SB3 兼容的线性调度：progress_remaining ∈ [0,1]。
+    值随训练进度从 start → end 线性变化。
+    """
+    start = float(start)
+    end = float(end)
+    def fn(progress_remaining: float) -> float:
+        return end + (start - end) * float(progress_remaining)
+    return fn
 
 
 class SelfPlayCallback(BaseCallback):
@@ -68,6 +84,14 @@ class SelfPlayCallback(BaseCallback):
         progress = min(1.0, self.num_timesteps / max(1, self.cfg.total_timesteps))
         ratio = (1 - progress) * self.cfg.rule_ratio_start + progress * self.cfg.rule_ratio_end
         self.pool.set_rule_ratio(ratio)
+
+        # 熵系数退火：从 ent_coef_start → ent_coef_end
+        try:
+            if hasattr(self.model, "ent_coef"):
+                ent = (1 - progress) * self.cfg.ent_coef_start + progress * self.cfg.ent_coef_end
+                self.model.ent_coef = float(ent)
+        except Exception:
+            pass
 
         # 每1000步打印一次进度和对手信息
         if self.num_timesteps % 1000 == 0:
@@ -126,8 +150,19 @@ class SelfPlayTrainer:
             env = make_env()
             return Monitor(env)  # 添加Monitor包装解决警告
 
-        self.train_env = DummyVecEnv([make_env_with_monitor])
-        self.eval_env = DummyVecEnv([make_env_with_monitor])
+        # 归一化包装：训练更新统计，评估仅使用统计不更新
+        self.train_env = VecNormalize(
+            DummyVecEnv([make_env_with_monitor]), norm_obs=True, norm_reward=True, clip_obs=10.0,
+            norm_obs_keys=["obs"]  # 只归一化 obs 部分，不归一化 action_mask
+        )
+        self.eval_env = VecNormalize(
+            DummyVecEnv([make_env_with_monitor]), norm_obs=True, norm_reward=False, clip_obs=10.0,
+            norm_obs_keys=["obs"]  # 只归一化 obs 部分，不归一化 action_mask
+        )
+        # 共享统计并关闭评估期统计更新
+        self.eval_env.obs_rms = self.train_env.obs_rms
+        self.eval_env.ret_rms = self.train_env.ret_rms
+        self.eval_env.training = False
 
         policy_kwargs = make_default_policy_kwargs(PolicyNetConfig(
             features_dim=cfg.policy_hidden_size,
@@ -138,14 +173,15 @@ class SelfPlayTrainer:
         self.model = PPO(
             policy=MaskedActorCriticPolicy,
             env=self.train_env,
-            learning_rate=cfg.learning_rate,
+            learning_rate=linear_schedule(cfg.learning_rate, cfg.learning_rate_end),
             n_steps=cfg.n_steps,
             batch_size=cfg.batch_size,
             gamma=cfg.gamma,
             gae_lambda=cfg.gae_lambda,
-            clip_range=cfg.clip_range,
-            ent_coef=cfg.ent_coef,
+            clip_range=linear_schedule(cfg.clip_range, cfg.clip_range_end),
+            ent_coef=cfg.ent_coef_start,
             vf_coef=cfg.vf_coef,
+            target_kl=cfg.target_kl,
             tensorboard_log=cfg.tensorboard_log,
             policy_kwargs=policy_kwargs,
             seed=cfg.seed,

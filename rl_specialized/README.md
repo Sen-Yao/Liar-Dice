@@ -19,12 +19,27 @@ python -m rl_specialized.training.train_selfplay --num_players 2 --timesteps 200
 
 要点：
 - 对手池初始包含多参数规则对手（起手面值∈{3,4,5}，挑战阈值偏移∈{2,3,4,5}）。
-- 规则体占比从 0.8 → 0.2（线性随训练进度下降）。
+- 规则体占比从 0.8 → 0.05（线性随训练进度下降）。
 - 每 `snapshot_freq` 步将当前策略保存并加入对手池（推断在 CPU 上进行，不占用训练设备显存）。
 - 观测与动作掩码与专用训练一致：`{'obs': state_vec, 'action_mask': mask}`。
 - 模型保存：
   - 快照：`runs/rl_selfplay/snapshots/snapshot_step_*.zip`
   - 最优：`runs/rl_selfplay/best_model/best_model.zip`
+
+#### 自博弈训练优化（近期更新）
+
+以下改动已在 `rl_specialized/training/train_selfplay.py` 生效，用于提升训练稳定性与评估泛化：
+
+- 学习率/剪切范围线性衰减：`lr 3e-4 → 5e-5`，`clip 0.2 → 0.1`（随进度线性）；新增 `linear_schedule`。
+- KL 目标约束：`target_kl=0.03`，抑制过激更新，降低回报震荡与策略崩塌风险。
+- 采样规模提升：`n_steps=2048`、`batch_size=256`、`gae_lambda=0.97`，降低梯度方差、提升稳定性。
+- 价值学习加强：`vf_coef=0.8`，并将自博弈默认网络宽度提升至 `256`（`features_dim=256`，`pi/vf` 两层MLP对称）。
+- 归一化：引入 `VecNormalize`（训练期对观测/回报归一化；评估与训练共享统计但不更新），评估更稳健。
+- 熵系数退火：`ent_coef 0.01 → 0.002` 随进度线性下降，前期鼓励探索、后期促使收敛。
+- 对手池日程：规则对手占比终值下调至 `0.05`，更早与策略快照及概率规则对手对抗，减少过拟合。
+- 评估：单次评估回合数增至 `20`；评估频率与 `n_steps` 对齐，并保存最优模型。
+
+提示：如需继续强化稳定性，可进一步调低 `learning_rate_end`（如 `3e-5`）或调小 `target_kl`（如 `0.02`）；也可以将 `n_steps` 提升到 `4096`（训练更慢但更稳）。
 
 #### 奖励潜在塑形（默认开启）
 
