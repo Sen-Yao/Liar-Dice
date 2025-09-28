@@ -1,6 +1,7 @@
 import argparse
 from env import LiarDiceEnv
 from agents.basic_agent import BasicRuleAgent
+from agents.heuristic_agent import HeuristicRuleAgent
 from agents.llm_agent import LLMAgent
 from human import run_human_vs_ai_mode
 
@@ -27,8 +28,13 @@ def run_ai_training_mode(args):
     for agent in env.possible_agents:
         if args.agent_type == "llm":
             agents[agent] = LLMAgent(agent, args.num_players)
-        else:
+        elif args.agent_type == "heuristic":
+            agents[agent] = HeuristicRuleAgent(agent, args.num_players, confidence_threshold=1)
+        elif args.agent_type == "basic":
             agents[agent] = BasicRuleAgent(agent, args.num_players)
+        else:
+            print(f"Unknow agent name:{args.agent_type}! Exiting...")
+            exit()
     
     print(f"🤖 使用 {args.agent_type.upper()} Agent 类型")
     print(f"👥 玩家数量: {args.num_players}")
@@ -88,7 +94,7 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--agent_type", 
-        choices=["basic", "llm"], 
+        choices=["basic", "llm", "heuristic"], 
         default="basic",
         help="AI训练模式下的Agent类型: 'basic'为规则Agent，'llm'为LLM Agent (默认: basic)"
     )

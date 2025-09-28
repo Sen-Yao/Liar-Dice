@@ -1,5 +1,6 @@
 from env import LiarDiceEnv
 from agents.human_agent import HumanAgent
+from agents.heuristic_agent import HeuristicRuleAgent
 from agents.basic_agent import BasicRuleAgent
 from agents.llm_agent import LLMAgent
 
@@ -31,8 +32,13 @@ def run_human_vs_ai_mode(args):
         if i != human_player_idx:
             if args.agent_type == "llm":
                 agents[f"player_{i}"] = LLMAgent(f"player_{i}", args.num_players)
-            else:
+            elif args.agent_type == "heuristic":
+                agents[f"player_{i}"] = HeuristicRuleAgent(f"player_{i}", args.num_players, confidence_threshold=2)
+            elif args.agent_type == "basic":
                 agents[f"player_{i}"] = BasicRuleAgent(f"player_{i}", args.num_players)
+            else:
+                print(f"Unknow agent name:{args.agent_type}! Exiting...")
+                exit()
     
     print(f"\n🎮 游戏设置:")
     print(f"你是: player_{human_player_idx} (人类)")
