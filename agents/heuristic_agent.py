@@ -23,7 +23,6 @@ class HeuristicRuleAgent:
 
     def get_action(self, observation: Dict) -> Action:
         # observation 是字典，其中包括的元素有 ['my_dice_counts'], ["last_guess"] 和 ['game_round_history']
-        print("Heuristic Agent thinking...")
         max_face = 0
         max_num = 0
         for i in range(1, 6):
@@ -93,5 +92,4 @@ class HeuristicRuleAgent:
         else:
             for i in range(6):
                 expect_dice_counts[i] += expect_unknown_every_face_dice_num * 1
-        print(f"expect:{expect_dice_counts}")
         return expect_dice_counts
