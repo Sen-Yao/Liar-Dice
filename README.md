@@ -101,6 +101,12 @@ Liar Dice 是一个回合制桌面游戏，游戏玩家为 2 名及以上，所�
 - 若被检验的猜测为“飞”模式：计数 = 全场中等于 face 的骰子 + 全场中点数为 1 的骰子（1 为 wild）。
 - 若被检验的猜测为“斋”模式：计数 = 全场中等于 face 的骰子（点数为 1 仅计入 face=1 的猜测）。
 
+## Requirements:
+
+```
+conda install pytorch==2.5.1 torchvision==0.20.1 torchaudio==2.5.1 pytorch-cuda=12.4 -c pytorch -c nvidia
+```
+
 ## 使用
 
 运行游戏：
