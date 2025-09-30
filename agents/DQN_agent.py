@@ -73,7 +73,7 @@ class DQNAgent:
     def __init__(self, agent_id: str, num_players: int, args, feature_dim=128,):
         self.agent_id = agent_id
         self.num_players = num_players
-        self.state_dim = 14
+        self.state_dim = 16
 
         self.q_network = ParametricQNetwork(self.state_dim, num_players, feature_dim=feature_dim)
         self.target_network = ParametricQNetwork(self.state_dim, num_players, feature_dim=feature_dim)
@@ -101,22 +101,22 @@ class DQNAgent:
 
         # 将非法动作的Q值设置为一个非常小的数
         large_negative = -1e9
-        main_q += (1 - main_mask) * large_negative
-        mode_q += (1 - mode_mask) * large_negative
-        count_q += (1 - count_mask) * large_negative
-        face_q += (1 - face_mask) * large_negative
+        main_action_q_values += (1 - main_mask) * large_negative
+        mode_q_values += (1 - mode_mask) * large_negative
+        count_q_values += (1 - count_mask) * large_negative
+        face_q_values += (1 - face_mask) * large_negative
 
         q_value_of_bidding = main_action_q_values[0] + mode_q_values.max() + count_q_values.max() + face_q_values.max()
-        q_value_of_challenge = main_q[1]
+        q_value_of_challenge = main_action_q_values[1]
 
         if q_value_of_challenge > q_value_of_bidding:
             return Challenge()
         
         else:
             # 根据被掩码后的 Q 值，选择最优参数
-            best_mode_idx = mode_q.argmax().item()
-            best_count_idx = count_q.argmax().item()
-            best_face_idx = face_q.argmax().item()
+            best_mode_idx = mode_q_values.argmax().item()
+            best_count_idx = count_q_values.argmax().item()
+            best_face_idx = face_q_values.argmax().item()
             
             # 将索引转换为游戏中的实际值
             mode = '飞' if best_mode_idx == 0 else '斋'
@@ -128,9 +128,9 @@ class DQNAgent:
 
         
     def get_state_vector(self, observation: Dict):
-        # 将观测转换为一个长度为 6+1+1+6+2=14 的状态向量
-        my_dice_counts = torch.tensor(observation['my_dice_counts'])
-        num_players = torch.tensor((self.num_players))
+        # 将观测转换为一个长度为 6+1+1+6+2=16 的状态向量
+        my_dice_counts = torch.tensor(list(observation['my_dice_counts']))
+        num_players = torch.tensor((self.num_players, ))
         last_guess = observation["last_guess"]
         last_guess_face = [0, 0, 0, 0, 0, 0]
         if last_guess == None:
@@ -138,7 +138,7 @@ class DQNAgent:
                 last_guess_num = torch.zeros(1)
         else:
             last_guess_face[last_guess.face-1] = 1
-            last_guess_num = torch.tensor((last_guess.count / (self.num_players * 5.0)))
+            last_guess_num = torch.tensor((last_guess.count / (self.num_players * 5.0), ))
             if last_guess.mode == '飞':
                 last_guess_mode = torch.tensor((1, 0))
             else:
