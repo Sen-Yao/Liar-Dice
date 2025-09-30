@@ -54,7 +54,8 @@ class LiarDiceEnv(AECEnv):
         "render_modes": ["human"],
     }
 
-    def __init__(self, num_players: int = 3, dice_per_player: int = 5, render_mode: Optional[str] = None):
+    def __init__(self, num_players: int = 3, dice_per_player: int = 5, render_mode: Optional[str] = None,
+                 use_specialized_action_space: bool = False):
         super().__init__()
         assert num_players >= 2, "Game requires at least 2 players"
         
@@ -62,6 +63,9 @@ class LiarDiceEnv(AECEnv):
         self.dice_per_player = dice_per_player
         self.total_dice = num_players * dice_per_player
         self.render_mode = render_mode
+        self.use_specialized_action_space = use_specialized_action_space
+        # 专用动作空间：计数从 n+1 开始；否则从 1 开始
+        self.min_count = (num_players + 1) if use_specialized_action_space else 1
 
         self.possible_agents = [f"player_{i}" for i in range(num_players)]
         self.agent_name_mapping = {agent: i for i, agent in enumerate(self.possible_agents)}
@@ -282,29 +286,28 @@ class LiarDiceEnv(AECEnv):
     def _is_strictly_greater(new_guess: Guess, old_guess: Guess) -> bool:
         """Implements the complex comparison logic for guesses."""
         if new_guess.mode == old_guess.mode:
-            if new_guess.count > old_guess.count:
-                return True
-            if new_guess.count == old_guess.count and new_guess.face > old_guess.face:
-                return True
-            return False
+            if new_guess.mode == '飞':
+                # 飞：个数更大或个数相同面值更大
+                if new_guess.count > old_guess.count:
+                    return True
+                if new_guess.count == old_guess.count and new_guess.face > old_guess.face:
+                    return True
+                return False
+            else:
+                # 斋：个数更大或个数相同按 2<3<4<5<6<1 比较
+                if new_guess.count > old_guess.count:
+                    return True
+                if new_guess.count == old_guess.count:
+                    zhai_order = {2: 0, 3: 1, 4: 2, 5: 3, 6: 4, 1: 5}
+                    return zhai_order[new_guess.face] > zhai_order[old_guess.face]
+                return False
 
+        # 跨模式：按半/倍规则，仅比较数量
         if new_guess.mode == '斋' and old_guess.mode == '飞':
-            # A '斋' guess's value is roughly double
-            if (new_guess.count * 2) > old_guess.count:
-                return True
-            if (new_guess.count * 2) == old_guess.count and new_guess.face > old_guess.face:
-                return True # This is a common house rule, assuming it applies
-            return False
-
+            return new_guess.count >= (old_guess.count + 1) // 2
         if new_guess.mode == '飞' and old_guess.mode == '斋':
-            # To go from '斋' to '飞', you need more than half the '斋' count
-            required_count = (old_guess.count * 2) + 1
-            if new_guess.count > required_count:
-                return True
-            if new_guess.count == required_count and new_guess.face > old_guess.face:
-                return True
-            return False
-            
+            return new_guess.count >= (old_guess.count * 2)
+
         return False
     
     def _get_observation_space(self) -> gymnasium.spaces.Space:
@@ -339,6 +342,54 @@ class LiarDiceEnv(AECEnv):
         """
         # A proper implementation for a library like SB3 would require flattening this
         # into a single Discrete space with an action mask.
-        return gymnasium.spaces.Discrete(1 + (2 * self.total_dice * 6))
+        counts_per_mode = (self.total_dice - self.min_count + 1)
+        if counts_per_mode < 0:
+            counts_per_mode = 0
+        return gymnasium.spaces.Discrete(1 + (2 * counts_per_mode * 6))
+
+    def action_to_object(self, action_id: int) -> Action:
+        """将动作ID转换为动作对象 - 用于RL训练"""
+        if action_id == 0:
+            return Challenge()
+
+        action_id -= 1  # 减去Challenge的ID
+
+        # 每种模式内的动作数量
+        counts_per_mode = (self.total_dice - self.min_count + 1)
+        actions_per_mode = counts_per_mode * 6
+
+        if action_id < actions_per_mode:
+            # 斋模式动作
+            count = (action_id // 6) + self.min_count
+            face = (action_id % 6) + 1
+            return Guess(mode='斋', count=count, face=face)
+        else:
+            # 飞模式动作
+            action_id -= actions_per_mode
+            count = (action_id // 6) + self.min_count
+            face = (action_id % 6) + 1
+            return Guess(mode='飞', count=count, face=face)
+
+    def get_action_mask(self, observation: Dict) -> np.ndarray:
+        """获取合法动作掩码 - 用于RL训练"""
+        counts_per_mode = (self.total_dice - self.min_count + 1)
+        if counts_per_mode < 0:
+            counts_per_mode = 0
+        total_actions = 1 + (2 * counts_per_mode * 6)
+        mask = np.zeros(total_actions, dtype=bool)
+
+        last_guess = observation.get("last_guess")
+
+        # Challenge总是可以执行（如果不是首轮）
+        if last_guess is not None:
+            mask[0] = True
+
+        # 检查所有猜测动作的合法性
+        for action_id in range(1, total_actions):
+            guess = self.action_to_object(action_id)
+            if self._is_legal(guess):
+                mask[action_id] = True
+
+        return mask
 
 # --- Example Usage ---
