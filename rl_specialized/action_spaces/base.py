@@ -48,6 +48,10 @@ class BaseActionSpace(ABC):
 
     def _is_legal_guess(self, guess: Guess, last_guess: Optional[Guess]) -> bool:
         """检查猜测是否合法"""
+        # 规则：飞模式禁止喊1
+        if guess.mode == '飞' and guess.face == 1:
+            return False
+
         # 首轮限制：第一个玩家猜测个数 > 玩家人数
         if last_guess is None:
             return guess.count > self.num_players

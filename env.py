@@ -275,10 +275,14 @@ class LiarDiceEnv(AECEnv):
 
     def _is_legal(self, guess: Guess) -> bool:
         """Checks if a guess is legal given the current game state."""
+        # Rule: 飞模式禁止喊1
+        if guess.mode == '飞' and guess.face == 1:
+            return False
+
         # Rule: First guess count must be > num_players
         if self.last_guess is None:
             return guess.count > self.num_players
-        
+
         # Rule: New guess must be greater than the last guess
         return self._is_strictly_greater(new_guess=guess, old_guess=self.last_guess)
 
