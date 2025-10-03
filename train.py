@@ -31,7 +31,7 @@ if __name__ == "__main__":
     parser.add_argument("--target_update_freq", type=int, default=1000, help="按步更新 target 网络的频率（steps）")
     parser.add_argument("--updates_per_step", type=int, default=1, help="每个环境步期望执行的优化次数（按回合末成批执行）")
     parser.add_argument("--warmup_steps", type=int, default=3000, help="仅收集数据的预热步数，期间不训练")
-    parser.add_argument("--challenge_suppress_steps", type=int, default=3, help="每轮最开始的K步探索时禁止Challenge")
+    parser.add_argument("--challenge_suppress_steps", type=int, default=6, help="每轮最开始的K步探索时禁止Challenge")
     parser.add_argument("--learning_rate", type=float, default=0.001, help="学习率")
 
     # Environment settings
