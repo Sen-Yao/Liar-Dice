@@ -109,9 +109,6 @@ class LiarDiceEnv(AECEnv):
         self.agent_selection = None # Initialize agent_selection
 
         self._start_new_round()
-        
-        self._agent_selector.reset()
-        self.agent_selection = self._agent_selector.next()
 
         # PettingZoo's AEC Env requires reset to return None, and initial obs is fetched via observe()
         # However, it's common for learning loops to expect an initial observation from reset.
@@ -263,21 +260,21 @@ class LiarDiceEnv(AECEnv):
 
         for agent in self.agents:
             self.player_hands[agent] = np.random.randint(1, 7, size=self.dice_per_player)
-        
+
         # Determine starting player
-        if self._round_loser is None: # First round of match
+        if self._round_loser is None:  # First round of match
             start_agent_idx = np.random.randint(self.num_players)
             start_agent = self.possible_agents[start_agent_idx]
-        else: # Loser of previous round starts
+        else:  # Loser of previous round starts
             start_agent = self._round_loser
-        
-        self._agent_selector = agent_selector(self.agents) # Reinitialize with current agent list
-        self._agent_selector.reset() # Reset to start with first agent
-        
-        # Advance to the starting agent
+
+        self._agent_selector = agent_selector(self.agents)
+        self._agent_selector.reset()
+
+        # Advance selector until it points to the chosen starting agent
+        self.agent_selection = self._agent_selector.next()
         while self.agent_selection != start_agent:
             self.agent_selection = self._agent_selector.next()
-        self.agent_selection = start_agent
 
     def _resolve_challenge(self) -> Tuple[str, str]:
         """Resolves a challenge and returns (winner, loser)."""
@@ -375,6 +372,14 @@ class LiarDiceEnv(AECEnv):
                 "count": gymnasium.spaces.Discrete(self.total_dice + 1),
                 "face": gymnasium.spaces.Discrete(7, start=1)
             }),
+            "game_round_history_encoded": gymnasium.spaces.Sequence(
+                gymnasium.spaces.Dict({
+                    "player_idx": gymnasium.spaces.Discrete(self.num_players),
+                    "mode": gymnasium.spaces.Discrete(2),
+                    "count": gymnasium.spaces.Discrete(self.total_dice + 1),
+                    "face": gymnasium.spaces.Discrete(7, start=1)
+                })
+            ),
 
             # 注意：observe() 仍会返回 last_guess（Guess对象）和 game_round_history（原始格式）
             # 但它们不在此空间定义中，RL库应忽略这些额外字段
