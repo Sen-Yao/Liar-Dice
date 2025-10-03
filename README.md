@@ -77,6 +77,9 @@ conda install pytorch==2.5.1 torchvision==0.20.1 torchaudio==2.5.1 cpuonly -c py
 
 # 安装其他依赖
 pip install numpy gymnasium pettingzoo
+
+# 如果使用 rl_specialized 训练方法，额外安装：
+pip install "stable-baselines3[extra]" tensorboard
 ```
 
 ### 运行示例
@@ -110,23 +113,32 @@ Liar-Dice/
 ├── env.py                    # PettingZoo 游戏环境实现
 ├── agents/
 │   ├── DQN_agent.py         # DQN 智能体（22维状态，组合动作Q）
-│   ├── heuristic_agent.py   # 启发式规则智能体
+│   ├── heuristic_agent.py   # 启发式规则智能体（含概率型变体）
 │   ├── human_agent.py       # 人类玩家接口
 │   └── llm_agent.py         # LLM 智能体（基于 OpenAI API）
 ├── train/
 │   └── DQN_train.py         # DQN 训练流程（DDQN + n-step + 奖励整形）
-├── train.py                 # 训练入口脚本
+├── train.py                 # 训练入口脚本（DQN 方法）
 ├── main.py                  # 人机对战入口
 ├── model_playground.py      # 模型评估与调试工具
 ├── utils.py                 # 工具函数（动作合法性检查等）
-└── models/                  # 保存的模型权重
+├── models/                  # 保存的模型权重（DQN .pth 文件）
+└── rl_specialized/          # 专用 RL 模型（PPO + SB3，独立训练路线）
+    ├── action_spaces/       # 玩家数量特定的动作空间
+    ├── agents/              # 专用智能体实现
+    ├── networks/            # 策略网络架构（带掩码支持）
+    ├── training/            # 训练脚本（自博弈 + 对抗规则体）
+    ├── utils/               # 状态编码器
+    └── README.md            # 专用模型详细文档
 ```
 
 ---
 
 ## 训练与评估
 
-### 训练 DQN 智能体
+本项目提供 **两种独立的训练方法**：
+
+### 方法 1: DQN 训练（主要方法）
 
 ```bash
 python train.py \
@@ -146,7 +158,7 @@ python train.py \
 - `--min_epsilon`：探索率下限（默认 0.1，避免过早收敛）
 - `--heuristic_ratio`：启发式对手占比（默认 0.5，自博弈对手占另一半）
 
-### 模型评估
+**DQN 模型评估**：
 
 ```bash
 # 快速评估（100 局）
@@ -160,6 +172,42 @@ python model_playground.py \
   --model-path models/dqn_model.pth \
   --interactive
 ```
+
+---
+
+### 方法 2: 专用 PPO 训练（rl_specialized）
+
+针对特定玩家数量训练优化的独立模型（使用 Stable-Baselines3 + PPO）：
+
+```bash
+# 自博弈训练（推荐，对手池 + 课程学习）
+python -m rl_specialized.training.train_selfplay \
+  --num_players 2 \
+  --timesteps 2000000 \
+  --snapshot_freq 200000
+
+# 对抗规则智能体训练
+python -m rl_specialized.training.train_specialized \
+  --num_players 2 \
+  --timesteps 200000
+
+# 使用 TensorBoard 监控训练
+tensorboard --logdir runs/rl_specialized
+```
+
+**特点**：
+- 玩家数量特定的动作空间（如 2 人局仅 97 个动作）
+- 合法动作掩码在 logits 层生效
+- VecNormalize 观测/奖励归一化
+- 学习率/裁剪范围线性衰减
+- KL 散度约束（target_kl=0.03）
+- 势能奖励整形（可选，默认开启）
+
+**模型保存位置**：
+- 自博弈：`runs/rl_selfplay/best_model/best_model.zip` 和 `snapshots/`
+- 规则对抗：`runs/rl_specialized/best_model/best_model.zip`
+
+详细文档请参考：[rl_specialized/README.md](rl_specialized/README.md)
 
 ---
 
@@ -207,7 +255,7 @@ python model_playground.py \
 
 ---
 
-## 算法说明
+## DQN算法说明
 
 ### 为何不使用 RNN？
 
@@ -235,3 +283,5 @@ python model_playground.py \
 | `min_epsilon` | 0.1 | 探索率下限 | 0.05-0.15，过低易收敛到局部最优 |
 | `target_soft_tau` | 0.005 | 目标网络更新率 | 0.001-0.01，过大目标网络变化快 |
 | `gamma` | 0.99 | 折扣因子 | 固定，短局博弈不建议调整 |
+
+---
