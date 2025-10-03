@@ -35,7 +35,6 @@ class HeuristicRuleAgent:
                 # 最多的点数甚至比 1 还多，可以考虑喊斋
                 expect_dice_counts = self.calculate_expectation(observation=observation, mode='斋')
                 if int(expect_dice_counts[max_face-1]) > self.num_players:
-                    print("int:", int(expect_dice_counts[max_face-1]))
                     return Guess(mode='斋', count=int(expect_dice_counts[max_face-1]), face=max_face)
                 else:
                     # 点数不够多,保守喊飞
@@ -43,7 +42,6 @@ class HeuristicRuleAgent:
             else:
                 expect_dice_counts = self.calculate_expectation(observation=observation, mode='飞')
                 if int(expect_dice_counts[max_face-1]) > self.num_players:
-                    print("int:", int(expect_dice_counts[max_face-1]))
                     return Guess(mode='飞', count=int(expect_dice_counts[max_face-1]), face=max_face)
                 else:
                     # 点数不够多,保守喊飞
@@ -79,6 +77,9 @@ class HeuristicRuleAgent:
                         return Guess(mode='飞', count=try_num, face=max_face)
                     else:
                         try_num += 1
+
+        # 如果在循环中没有找到合法的加注，保底选择挑战，避免返回 None
+        return Challenge()
 
     def calculate_expectation(self,  observation: Dict, mode='飞'):
         # 基于手牌和场上情况来计算期望

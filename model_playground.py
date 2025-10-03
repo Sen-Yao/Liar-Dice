@@ -162,13 +162,17 @@ def run_eval_episode(env: LiarDiceEnv, rl_agent: DQNAgent, opponents: Dict[str, 
     }
 
 
-def evaluate_agent(agent: DQNAgent, episodes: int) -> None:
+def evaluate_agent(agent: DQNAgent, episodes: int, opponent_confidence: int) -> None:
     if episodes <= 0:
         return
 
     env = LiarDiceEnv(num_players=agent.num_players)
     opponents = {
-        agent_id: HeuristicRuleAgent(agent_id, agent.num_players, confidence_threshold=1)
+        agent_id: HeuristicRuleAgent(
+            agent_id,
+            agent.num_players,
+            confidence_threshold=opponent_confidence,
+        )
         for agent_id in env.possible_agents
         if agent_id != agent.agent_id
     }
@@ -266,7 +270,7 @@ def prompt_human_action(env: LiarDiceEnv, observation: Dict) -> Guess | Challeng
         print("无法识别的输入，请输入 g/c/h/q。")
 
 
-def play_against_model(agent: DQNAgent, rounds: int) -> None:
+def play_against_model(agent: DQNAgent, rounds: int, opponent_confidence: int) -> None:
     if rounds <= 0:
         return
 
@@ -277,7 +281,11 @@ def play_against_model(agent: DQNAgent, rounds: int) -> None:
     for agent_id in env.possible_agents:
         if agent_id in {agent.agent_id, "player_1"}:
             continue
-        opponents[agent_id] = HeuristicRuleAgent(agent_id, agent.num_players, confidence_threshold=1)
+        opponents[agent_id] = HeuristicRuleAgent(
+            agent_id,
+            agent.num_players,
+            confidence_threshold=opponent_confidence,
+        )
 
     print("\n=== 开始互动对局 ===")
     print("你是 player_1，AI 是 player_0。其余玩家由启发式策略扮演。")
@@ -359,6 +367,12 @@ def parse_args() -> argparse.Namespace:
         default=0,
         help="Number of interactive rounds to play as player_1",
     )
+    parser.add_argument(
+        "--opp-confidence",
+        type=int,
+        default=1,
+        help="Challenge aggressiveness of heuristic opponents (default: 1)",
+    )
 
     return parser.parse_args()
 
@@ -375,10 +389,10 @@ def main() -> None:
     print(f"Loaded model for num_players={agent.num_players}")
 
     if args.eval_episodes > 0:
-        evaluate_agent(agent, args.eval_episodes)
+        evaluate_agent(agent, args.eval_episodes, args.opp_confidence)
 
     if args.play_rounds > 0:
-        play_against_model(agent, args.play_rounds)
+        play_against_model(agent, args.play_rounds, args.opp_confidence)
 
     if args.eval_episodes <= 0 and args.play_rounds <= 0:
         print("未指定 --eval-episodes 或 --play-rounds，脚本完成。")

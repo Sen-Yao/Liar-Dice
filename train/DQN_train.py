@@ -12,9 +12,10 @@ try:
 except Exception:
     wandb = None
 
-from env import LiarDiceEnv, Guess, Challenge, Action
+from env import LiarDiceEnv, Challenge, Action
 from agents.DQN_agent import DQNAgent
-from utils import is_strictly_greater, get_legal_actions
+from agents.heuristic_agent import HeuristicRuleAgent
+from utils import get_legal_actions
 
 class ReplayBuffer:
     """Experience replay buffer for storing transitions"""
@@ -52,6 +53,75 @@ def select_action(agent: DQNAgent, observation: Dict, epsilon: float,
         return random.choice(candidates)
     # Exploitation
     return agent.get_action(observation)
+
+
+def make_frozen_opponent(agent: DQNAgent, args, *, agent_id: Optional[str] = None) -> DQNAgent:
+    """Create a frozen copy of the learning agent for self-play opponents."""
+
+    frozen = DQNAgent(
+        agent_id=agent_id or agent.agent_id,
+        num_players=agent.num_players,
+        args=args,
+    )
+    frozen.q_network.load_state_dict(agent.q_network.state_dict())
+    frozen.target_network.load_state_dict(agent.target_network.state_dict())
+    frozen.q_network.eval()
+    frozen.target_network.eval()
+    return frozen
+
+
+def sample_assignment(env: LiarDiceEnv, agent: DQNAgent, heuristic_ratio: float) -> Dict[str, str]:
+    """Sample opponent type for each non-learning seat."""
+
+    assignment: Dict[str, str] = {}
+    for pid in env.possible_agents:
+        if pid == agent.agent_id:
+            continue
+        assignment[pid] = "heuristic" if random.random() < heuristic_ratio else "frozen"
+    if assignment and all(policy == "frozen" for policy in assignment.values()):
+        random_pid = random.choice(list(assignment.keys()))
+        assignment[random_pid] = "heuristic"
+    return assignment
+
+
+def quick_evaluate(agent: DQNAgent, num_players: int, episodes: int, opp_conf: int) -> float:
+    """Run lightweight evaluation against heuristic opponents, returning win rate."""
+
+    if episodes <= 0:
+        return 0.0
+
+    eval_env = LiarDiceEnv(num_players=num_players)
+    opponents = {
+        pid: HeuristicRuleAgent(pid, num_players, confidence_threshold=opp_conf)
+        for pid in eval_env.possible_agents
+        if pid != agent.agent_id
+    }
+
+    wins = 0
+    for _ in range(episodes):
+        eval_env.reset()
+        done = False
+
+        while not done:
+            current = eval_env.agent_selection
+            observation = eval_env.observe(current)
+
+            if eval_env.terminations[current] or eval_env.truncations[current]:
+                eval_env.step(None)
+                continue
+
+            if current == agent.agent_id:
+                action = agent.get_action(observation)
+            else:
+                action = opponents[current].get_action(observation)
+
+            eval_env.step(action)
+            done = all(eval_env.terminations.values()) or all(eval_env.truncations.values())
+
+        if eval_env.penalties[agent.agent_id] == min(eval_env.penalties.values()):
+            wins += 1
+
+    return wins / float(episodes)
 
 def train_dqn(agent: DQNAgent, env: LiarDiceEnv, args) -> Tuple[DQNAgent, Dict]:
     """Complete DQN training pipeline"""
@@ -92,19 +162,49 @@ def train_dqn(agent: DQNAgent, env: LiarDiceEnv, args) -> Tuple[DQNAgent, Dict]:
     # Create models directory if it doesn't exist
     os.makedirs("./models", exist_ok=True)
 
+    frozen_pool: List[DQNAgent] = []
+
+    def refresh_frozen_pool() -> None:
+        frozen_copy = make_frozen_opponent(agent, args, agent_id="frozen")
+        frozen_pool.append(frozen_copy)
+        pool_limit = max(1, getattr(args, "frozen_pool_size", 1))
+        if len(frozen_pool) > pool_limit:
+            frozen_pool.pop(0)
+
+    refresh_frozen_pool()
+
+    min_epsilon = max(getattr(args, "min_epsilon", 0.0), args.epsilon_end)
+
     for episode in tqdm(range(args.num_episodes), desc="Training Episodes"):
         episode_reward = 0.0
         episode_length = 0
         episode_challenge_cnt = 0
         episode_early_challenge_cnt = 0
 
+        if args.frozen_opponent_update_interval > 0 and (episode % args.frozen_opponent_update_interval == 0):
+            refresh_frozen_pool()
+
+        opponents = {
+            pid: HeuristicRuleAgent(pid, env.num_players, confidence_threshold=args.opponent_confidence)
+            for pid in env.possible_agents
+            if pid != agent.agent_id
+        }
+
+        episode_assignment = None
+        if getattr(args, "mix_mode", "round") == "episode":
+            episode_assignment = sample_assignment(env, agent, getattr(args, "heuristic_ratio", 0.5))
+
         rounds = getattr(args, 'rounds_per_episode', 1)
         for _ in range(rounds):
-            # New round
             env.reset()
             done = False
             round_step = 0
-            step_data = []
+            step_data: List[Dict] = []
+
+            if getattr(args, "mix_mode", "round") == "round":
+                assignment = sample_assignment(env, agent, getattr(args, "heuristic_ratio", 0.5))
+            else:
+                assignment = episode_assignment or sample_assignment(env, agent, getattr(args, "heuristic_ratio", 0.5))
 
             while not done and round_step < args.max_steps_per_episode:
                 current_agent_id = env.agent_selection
@@ -117,78 +217,104 @@ def train_dqn(agent: DQNAgent, env: LiarDiceEnv, args) -> Tuple[DQNAgent, Dict]:
                     env.step(None)
                     continue
 
-                legal_actions = get_legal_actions(observation, args.num_players)
-                if not legal_actions:
-                    raise RuntimeError(
-                        f"No legal actions available for {current_agent_id}. last_guess={observation.get('last_guess')}"
+                if current_agent_id == agent.agent_id:
+                    legal_actions = get_legal_actions(observation, args.num_players)
+                    if not legal_actions:
+                        raise RuntimeError(
+                            f"No legal actions available for {current_agent_id}. last_guess={observation.get('last_guess')}"
+                        )
+
+                    action = select_action(
+                        agent,
+                        observation,
+                        epsilon,
+                        legal_actions,
+                        round_step=round_step,
+                        challenge_suppress_steps=getattr(args, 'challenge_suppress_steps', 0)
                     )
 
-                action = select_action(
-                    agent,
-                    observation,
-                    epsilon,
-                    legal_actions,
-                    round_step=round_step,
-                    challenge_suppress_steps=getattr(args, 'challenge_suppress_steps', 0)
-                )
+                    state_tensor = agent.get_state_vector(observation).unsqueeze(0)
 
-                state_tensor = agent.get_state_vector(observation).unsqueeze(0)
+                    if isinstance(action, Challenge):
+                        main_action_idx = 1
+                        mode_idx = 0
+                        count_idx = 0
+                        face_idx = 0
+                        episode_challenge_cnt += 1
+                        if round_step < getattr(args, 'challenge_suppress_steps', 0):
+                            episode_early_challenge_cnt += 1
+                    else:
+                        main_action_idx = 0
+                        mode_idx = 0 if action.mode == '飞' else 1
+                        count_idx = action.count - 1
+                        face_idx = action.face - 1
 
-                if isinstance(action, Challenge):
-                    main_action_idx = 1
-                    mode_idx = 0
-                    count_idx = 0
-                    face_idx = 0
-                    episode_challenge_cnt += 1
-                    if round_step < getattr(args, 'challenge_suppress_steps', 0):
-                        episode_early_challenge_cnt += 1
+                    action_indices = torch.tensor([main_action_idx, mode_idx, count_idx, face_idx], dtype=torch.long)
+
+                    env.step(action)
+
+                    reward = env.rewards[current_agent_id]
+                    termination = env.terminations[current_agent_id]
+                    truncation = env.truncations[current_agent_id]
+
+                    step_data.append({
+                        'state': state_tensor,
+                        'action': action_indices,
+                        'reward': reward,
+                        'done': termination or truncation,
+                    })
+
+                    episode_reward += reward
+                    episode_length += 1
+                    round_step += 1
+                    global_step += 1
+
+                    epsilon = max(min_epsilon, epsilon * args.epsilon_decay)
+
+                    if args.target_update_freq > 0 and (global_step % args.target_update_freq == 0):
+                        agent.target_network.load_state_dict(agent.q_network.state_dict())
+
+                    if termination or truncation:
+                        done = True
                 else:
-                    main_action_idx = 0
-                    mode_idx = 0 if action.mode == '飞' else 1
-                    count_idx = action.count - 1
-                    face_idx = action.face - 1
+                    policy = assignment.get(current_agent_id, "heuristic") if assignment else "heuristic"
+                    if policy == "heuristic" or not frozen_pool:
+                        action = opponents[current_agent_id].get_action(observation)
+                    else:
+                        frozen_opponent = random.choice(frozen_pool)
+                        action = frozen_opponent.get_action(observation)
 
-                action_indices = torch.tensor([main_action_idx, mode_idx, count_idx, face_idx], dtype=torch.long)
+                    env.step(action)
 
-                env.step(action)
+                    if step_data:
+                        final_reward = env.rewards[agent.agent_id]
+                        last_reward = step_data[-1]['reward']
+                        if final_reward != last_reward:
+                            episode_reward += (final_reward - last_reward)
+                            step_data[-1]['reward'] = final_reward
 
-                reward = env.rewards[current_agent_id]
-                termination = env.terminations[current_agent_id]
-                truncation = env.truncations[current_agent_id]
+                    termination = env.terminations[current_agent_id]
+                    truncation = env.truncations[current_agent_id]
 
-                step_data.append({
-                    'state': state_tensor,
-                    'action': action_indices,
-                    'reward': reward,
-                    'next_state': None,
-                    'done': termination or truncation
-                })
+                    if termination or truncation:
+                        done = True
 
-                # Step-level bookkeeping
-                episode_reward += reward
-                episode_length += 1
-                round_step += 1
-                global_step += 1
+                if done and step_data:
+                    final_reward = env.rewards[agent.agent_id]
+                    last_reward = step_data[-1]['reward']
+                    if final_reward != last_reward:
+                        episode_reward += (final_reward - last_reward)
+                        step_data[-1]['reward'] = final_reward
+                    step_data[-1]['done'] = True
 
-                # Epsilon decay per step
-                epsilon = max(args.epsilon_end, epsilon * args.epsilon_decay)
-
-                # Periodic target update by steps
-                if args.target_update_freq > 0 and (global_step % args.target_update_freq == 0):
-                    agent.target_network.load_state_dict(agent.q_network.state_dict())
-
-                if termination or truncation:
-                    done = True
-
-            # End of round: backfill next_state and push transitions
-            if len(step_data) > 0:
-                last_obs_for_next = env.observe(env.agent_selection) if env.agent_selection is not None else observation
+            if step_data:
                 for i, data in enumerate(step_data):
                     if i < len(step_data) - 1:
                         data['next_state'] = step_data[i + 1]['state']
+                        data['done'] = False
                     else:
-                        # Use the latest available observation as terminal next state proxy
-                        data['next_state'] = agent.get_state_vector(last_obs_for_next).unsqueeze(0)
+                        data['next_state'] = torch.zeros_like(data['state'])
+                        data['done'] = data.get('done', True)
 
                     replay_buffer.push(
                         data['state'],
@@ -198,13 +324,27 @@ def train_dqn(agent: DQNAgent, env: LiarDiceEnv, args) -> Tuple[DQNAgent, Dict]:
                         data['done']
                     )
 
-                # Perform updates proportional to steps collected in this round
                 updates = getattr(args, 'updates_per_step', 1) * len(step_data)
                 for _ in range(updates):
                     if global_step >= getattr(args, 'warmup_steps', 0) and len(replay_buffer) >= args.batch_size:
                         loss = train_agent_step(agent, replay_buffer, args)
                         if use_wandb:
                             wandb.log({"loss_values": loss}, step=global_step)
+
+        eval_interval = getattr(args, "eval_interval", 0)
+        eval_episodes = getattr(args, "eval_episodes", 0)
+        if eval_interval > 0 and eval_episodes > 0 and (episode + 1) % eval_interval == 0:
+            win_rate = quick_evaluate(agent, args.num_players, eval_episodes, args.opponent_confidence)
+            print(
+                f"[Eval] episode={episode + 1} win_rate_vs_heuristic(conf={args.opponent_confidence}): {win_rate * 100:.1f}%"
+            )
+
+        if (
+            getattr(args, "epsilon_reset_interval", 0) > 0
+            and (episode + 1) % args.epsilon_reset_interval == 0
+        ):
+            reset_value = max(min_epsilon, getattr(args, "epsilon_reset_value", args.epsilon_start))
+            epsilon = max(min_epsilon, reset_value)
 
         # Episode-level logging
         if use_wandb:
@@ -224,7 +364,9 @@ def train_dqn(agent: DQNAgent, env: LiarDiceEnv, args) -> Tuple[DQNAgent, Dict]:
                 'model_state_dict': agent.q_network.state_dict(),
                 'target_state_dict': agent.target_network.state_dict(),
                 'optimizer_state_dict': agent.optimizer.state_dict(),
-                'epsilon': epsilon
+                'epsilon': epsilon,
+                'num_players': args.num_players,
+                'learning_rate': args.learning_rate,
             }, args.model_save_path.replace('.pth', f'_ep{episode}.pth'))
 
     # Save final model
@@ -233,7 +375,9 @@ def train_dqn(agent: DQNAgent, env: LiarDiceEnv, args) -> Tuple[DQNAgent, Dict]:
         'model_state_dict': agent.q_network.state_dict(),
         'target_state_dict': agent.target_network.state_dict(),
         'optimizer_state_dict': agent.optimizer.state_dict(),
-        'epsilon': epsilon
+        'epsilon': epsilon,
+        'num_players': args.num_players,
+        'learning_rate': args.learning_rate,
     }, args.model_save_path)
 
     print(f"✅ Training completed! Model saved to {args.model_save_path}")
