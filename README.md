@@ -207,11 +207,9 @@ tensorboard --logdir runs/rl_specialized
 - 自博弈：`runs/rl_selfplay/best_model/best_model.zip` 和 `snapshots/`
 - 规则对抗：`runs/rl_specialized/best_model/best_model.zip`
 
-详细文档请参考：[rl_specialized/README.md](rl_specialized/README.md)
-
 ---
 
-## 技术特性
+## DQN技术特性
 
 ### 1. 组合动作 Q 值 + 合法动作掩码
 - **问题**：传统多头输出（主动作 / 模式 / 数量 / 点数分开预测）容易产生非法组合（如首手开牌、飞模式叫 1）
@@ -285,3 +283,6 @@ tensorboard --logdir runs/rl_specialized
 | `gamma` | 0.99 | 折扣因子 | 固定，短局博弈不建议调整 |
 
 ---
+
+## PPO策略技术特性与算法说明
+详细文档请参考：[rl_specialized/README.md](rl_specialized/README.md)
