@@ -185,9 +185,16 @@ class LiarDiceEnv(AECEnv):
         # So we don't start a new round here. The training loop manages episodes.
 
     def observe(self, agent: str) -> Dict:
-        """Returns the observation for a specific agent."""
+        """返回观测，包含Guess对象（兼容）和dict版本（类型正确）
+
+        返回字典包含：
+        - last_guess: Guess对象或None（保持向后兼容）
+        - last_guess_encoded: dict版本，供严格类型检查使用
+        - game_round_history: 原始格式（保持兼容）
+        - game_round_history_encoded: list[dict]版本
+        """
         dice_counts = np.bincount(self.player_hands[agent], minlength=7)[1:] # Index 0 is unused
-        
+
         state = AgentState(
             my_dice_counts=tuple(dice_counts),
             num_players=self.num_players,
@@ -195,10 +202,39 @@ class LiarDiceEnv(AECEnv):
             player_penalties=tuple(self.penalties[a] for a in self.possible_agents),
             current_player_id_idx=self.agent_name_mapping[self.agent_selection],
             is_my_turn=(agent == self.agent_selection),
-            last_guess=self.last_guess,
+            last_guess=self.last_guess,  # 保留Guess对象用于兼容
             game_round_history=tuple((self.agent_name_mapping[a], g) for a, g in self.round_history)
         )
-        return state.__dict__ # Return as a dictionary for Gym space compatibility
+
+        obs_dict = state.__dict__.copy()
+
+        # 添加类型正确的编码版本（供严格检查的库使用）
+        if self.last_guess is not None:
+            obs_dict['last_guess_encoded'] = {
+                'mode': 0 if self.last_guess.mode == '飞' else 1,
+                'count': self.last_guess.count,
+                'face': self.last_guess.face
+            }
+        else:
+            # 使用哨兵值而非None，符合Dict space要求
+            obs_dict['last_guess_encoded'] = {
+                'mode': -1,  # -1 表示"无猜测"
+                'count': 0,
+                'face': 1
+            }
+
+        # 历史编码版本
+        obs_dict['game_round_history_encoded'] = [
+            {
+                'player_idx': player_idx,
+                'mode': 0 if guess.mode == '飞' else 1,
+                'count': guess.count,
+                'face': guess.face
+            }
+            for player_idx, guess in obs_dict['game_round_history']
+        ]
+
+        return obs_dict
 
     def render(self, mode: str = "human"):
         """Renders the current state of the game."""
@@ -315,8 +351,16 @@ class LiarDiceEnv(AECEnv):
         return False
     
     def _get_observation_space(self) -> gymnasium.spaces.Space:
-        """Defines the observation space for an agent."""
-        # This is a simplified representation. A real NN would need more sophisticated encoding.
+        """定义观测空间
+
+        注意事项：
+        1. observe() 返回的 last_guess 是 Guess 对象（兼容旧代码）
+        2. observe() 返回的 last_guess_encoded 是 dict（类型正确，供RL库使用）
+        3. 观测空间仅声明 _encoded 版本，避免类型检查错误
+        4. 旧代码仍可访问 obs['last_guess'].mode，但RL库应使用 obs['last_guess_encoded']['mode']
+
+        变更原因：Guess 对象无法用 Gymnasium Space 准确表示，会导致 check_env() 失败
+        """
         return gymnasium.spaces.Dict({
             "my_dice_counts": gymnasium.spaces.MultiDiscrete([self.dice_per_player + 1] * 6),
             "num_players": gymnasium.spaces.Discrete(self.num_players + 1, start=2),
@@ -324,17 +368,16 @@ class LiarDiceEnv(AECEnv):
             "player_penalties": gymnasium.spaces.MultiDiscrete([10] * self.num_players), # Assuming max 10 penalties
             "current_player_id_idx": gymnasium.spaces.Discrete(self.num_players),
             "is_my_turn": gymnasium.spaces.Discrete(2),
-            # last_guess and history are complex; they would be tokenized/embedded in a real model
-            # For simplicity, we omit them from the formal space definition but they are in the obs dict
-            "last_guess": gymnasium.spaces.Dict({
-                "mode": gymnasium.spaces.Discrete(2), # 0:飞, 1:斋
+
+            # 仅声明编码版本（类型正确）
+            "last_guess_encoded": gymnasium.spaces.Dict({
+                "mode": gymnasium.spaces.Discrete(3, start=-1), # -1:无, 0:飞, 1:斋
                 "count": gymnasium.spaces.Discrete(self.total_dice + 1),
                 "face": gymnasium.spaces.Discrete(7, start=1)
             }),
-            "game_round_history": gymnasium.spaces.Sequence(gymnasium.spaces.Tuple((
-                gymnasium.spaces.Discrete(self.num_players), 
-                gymnasium.spaces.Box(low=0, high=self.total_dice, shape=(3,)) # (mode, count, face)
-                )))
+
+            # 注意：observe() 仍会返回 last_guess（Guess对象）和 game_round_history（原始格式）
+            # 但它们不在此空间定义中，RL库应忽略这些额外字段
         })
 
     def _get_action_space(self) -> gymnasium.spaces.Space:

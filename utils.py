@@ -2,32 +2,33 @@ from typing import List, Tuple, Dict, Optional
 from env import LiarDiceEnv, Guess, Challenge, Action
 
 def is_strictly_greater(new_guess, old_guess) -> bool:
-    """Implements the complex comparison logic for guesses."""
+    """实现猜测比较逻辑（与env.py._is_strictly_greater保持完全一致）"""
     if new_guess.mode == old_guess.mode:
-        if new_guess.count > old_guess.count:
-            return True
-        if new_guess.count == old_guess.count and new_guess.face > old_guess.face:
-            return True
-        return False
+        # 同模式比较
+        if new_guess.mode == '飞':
+            # 飞模式：新猜测必须更大（个数多或个数相同时数字大）
+            if new_guess.count > old_guess.count:
+                return True
+            if new_guess.count == old_guess.count and new_guess.face > old_guess.face:
+                return True
+            return False
+        else:  # '斋'模式
+            # 斋模式：新个数 > 旧个数，或个数相同时按斋模式排序（2<3<4<5<6<1）
+            if new_guess.count > old_guess.count:
+                return True
+            if new_guess.count == old_guess.count:
+                # 斋模式数字大小：2 < 3 < 4 < 5 < 6 < 1
+                zhai_order = {2: 0, 3: 1, 4: 2, 5: 3, 6: 4, 1: 5}
+                return zhai_order[new_guess.face] > zhai_order[old_guess.face]
+            return False
 
+    # 跨模式比较：仅比较数量，不比较面值
     if new_guess.mode == '斋' and old_guess.mode == '飞':
-        # A '斋' guess's value is roughly double
-        if (new_guess.count * 2) > old_guess.count:
-            return True
-        if (new_guess.count * 2) == old_guess.count and new_guess.face > old_guess.face:
-            return True # This is a common house rule, assuming it applies
-        return False
-
-    if new_guess.mode == '飞' and old_guess.mode == '斋':
-        # To go from '斋' to '飞', you need more than half the '斋' count
-        required_count = (old_guess.count * 2) + 1
-        if new_guess.count > required_count:
-            return True
-        if new_guess.count == required_count and new_guess.face > old_guess.face:
-            return True
-        return False
-        
-    return False
+        # 飞 → 斋：新个数 ≥ 旧个数/2（向上取整）
+        return new_guess.count >= (old_guess.count + 1) // 2
+    else:  # new_guess.mode == '飞' and old_guess.mode == '斋'
+        # 斋 → 飞：新个数 ≥ 旧个数×2
+        return new_guess.count >= old_guess.count * 2
 
 def get_legal_actions(observation: Dict, num_players: int) -> List[Action]:
     """Get all legal actions for current observation"""
@@ -49,7 +50,7 @@ def get_legal_actions(observation: Dict, num_players: int) -> List[Action]:
                 guess = Guess(mode=mode, count=count, face=face)
 
                 if last_guess is None:
-                    if count >= num_players:  # First guess must be at least num_players
+                    if count > num_players:  # First guess must be greater than num_players
                         legal_actions.append(guess)
                 elif is_strictly_greater(guess, last_guess):
                     legal_actions.append(guess)

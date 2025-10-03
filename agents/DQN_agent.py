@@ -4,8 +4,7 @@ import torch.nn as nn
 import torch.optim as optim
 from typing import Dict
 
-from env import Guess, Challenge, Action
-from utils import is_strictly_greater
+from env import Guess, Challenge, Action, LiarDiceEnv
 
 class ParametricQNetwork(nn.Module):
     # 根据状态向量的输入, 判断各个动作的 Q 值
@@ -73,7 +72,7 @@ class DQNAgent:
     def __init__(self, agent_id: str, num_players: int, args, feature_dim=128,):
         self.agent_id = agent_id
         self.num_players = num_players
-        self.state_dim = 16
+        self.state_dim = 19  # 从16增加到19（+3维历史统计特征）
 
         self.q_network = ParametricQNetwork(self.state_dim, num_players, feature_dim=feature_dim)
         self.target_network = ParametricQNetwork(self.state_dim, num_players, feature_dim=feature_dim)
@@ -95,8 +94,6 @@ class DQNAgent:
 
         # 基于 Q 网络的输出进行判断
         # 但需要基于行动空间进行约束
-
-        # mode, count, face = self.action_convert(mode_q_values=mode_q_values, count_q_values=count_q_values, face_q_values=face_q_values)
         main_mask, mode_mask, count_mask, face_mask = self._create_masks(observation['last_guess'])
 
         # 将非法动作的Q值设置为一个非常小的数
@@ -125,46 +122,79 @@ class DQNAgent:
 
             return Guess(mode=mode, count=count, face=face)
 
-
-        
     def get_state_vector(self, observation: Dict):
-        # 将观测转换为一个长度为 6+1+1+6+2=16 的状态向量
-        my_dice_counts = torch.tensor(list(observation['my_dice_counts']))
-        num_players = torch.tensor((self.num_players, ))
-        last_guess = observation["last_guess"]
-        last_guess_face = [0, 0, 0, 0, 0, 0]
-        if last_guess == None:
-                last_guess_mode = torch.tensor((0, 0))
-                last_guess_num = torch.zeros(1)
-        else:
-            last_guess_face[last_guess.face-1] = 1
-            last_guess_num = torch.tensor((last_guess.count / (self.num_players * 5.0), ))
-            if last_guess.mode == '飞':
-                last_guess_mode = torch.tensor((1, 0))
-            else:
-                last_guess_mode = torch.tensor((0, 1))
-        last_guess_face = torch.tensor(last_guess_face)
-        state_vector = torch.cat([my_dice_counts, num_players, last_guess_num, last_guess_face, last_guess_mode], dim=0)
-        return state_vector
-        
-    def action_convert(self, mode_q_values, count_q_values, face_q_values):
-        # 根据网络预测的猜测动作 Q 值，将其转换为一个猜测三元组
-        # 此模块不负责检查动作合法性, 默认输入的 Q 值对应的动作是合法的猜测
-        # 猜测
-        if mode_q_values[0] > mode_q_values[1]:
-            mode = '飞'
-        else:
-            mode = '斋'
-        
-        _, count = torch.max(count_q_values)
-        # 从下标变成真正的个数, 需要加 1
-        count = count + 1
+        """将观测转换为状态向量（16→19维）
 
-        _, face = torch.max(face_q_values)
-        # 从下标变成真正的点数, 需要加 1
-        face = face + 1
-        return mode, count, face
-    
+        原有16维特征：
+        - my_dice_counts: 6维，手牌统计
+        - num_players: 1维，玩家总数
+        - last_guess_num: 1维，上次猜测个数（归一化）
+        - last_guess_face: 6维，上次猜测点数（one-hot）
+        - last_guess_mode: 2维，上次猜测模式（one-hot）
+
+        新增3维历史统计特征：
+        - current_round_progress: 当前轮次进度（history长度/总骰子数）
+        - history_avg_count: 本轮历史平均猜测个数（归一化）
+        - history_max_count: 本轮历史最大猜测个数（归一化）
+
+        总计：6+1+1+6+2+1+1+1 = 19维
+
+        删除的冗余特征：
+        - challenge_urgency（与 last_guess_num 完全相同）
+        - num_alive_players_ratio（硬编码为1.0，无信息）
+        """
+        # 原有16维特征
+        my_dice_counts = torch.tensor(list(observation['my_dice_counts']), dtype=torch.float32)
+        num_players = torch.tensor([self.num_players], dtype=torch.float32)
+
+        last_guess = observation["last_guess"]
+        last_guess_face = [0.0] * 6
+
+        if last_guess is None:
+            last_guess_mode = torch.tensor([0.0, 0.0])
+            last_guess_num = torch.zeros(1)
+        else:
+            last_guess_face[last_guess.face - 1] = 1.0
+            last_guess_num = torch.tensor([last_guess.count / (self.num_players * 5.0)])
+
+            if last_guess.mode == '飞':
+                last_guess_mode = torch.tensor([1.0, 0.0])
+            else:
+                last_guess_mode = torch.tensor([0.0, 1.0])
+
+        last_guess_face = torch.tensor(last_guess_face)
+
+        # 新增3维历史统计特征
+        history = observation.get('game_round_history', [])
+        total_dice = self.num_players * 5.0
+
+        if len(history) > 0:
+            # 当前轮次进度
+            current_round_progress = torch.tensor([len(history) / total_dice])
+
+            # 历史猜测个数统计
+            history_counts = [guess.count for _, guess in history]
+            history_avg_count = torch.tensor([np.mean(history_counts) / total_dice])
+            history_max_count = torch.tensor([max(history_counts) / total_dice])
+        else:
+            current_round_progress = torch.zeros(1)
+            history_avg_count = torch.zeros(1)
+            history_max_count = torch.zeros(1)
+
+        # 拼接所有特征：6+1+1+6+2+1+1+1 = 19维
+        state_vector = torch.cat([
+            my_dice_counts,              # 6维：手牌统计
+            num_players,                  # 1维：玩家总数
+            last_guess_num,              # 1维：上次猜测个数
+            last_guess_face,             # 6维：上次猜测点数
+            last_guess_mode,             # 2维：上次猜测模式
+            current_round_progress,      # 1维：轮次进度
+            history_avg_count,           # 1维：历史平均猜测
+            history_max_count            # 1维：历史最大猜测
+        ], dim=0)
+
+        return state_vector
+
     def _create_masks(self, last_guess):
         """
         根据当前观测值，为所有动作头创建掩码。
@@ -198,10 +228,11 @@ class DQNAgent:
             # b. 任何模式和点数都合法
             mode_mask[:] = 1
             face_mask[:] = 1
-            
-            # c. 猜测的数量必须大于等于玩家数量
-            # count_mask的索引 i 对应数量 i+1，所以数量 num_players 对应索引 num_players-1
-            count_mask[self.num_players - 1:] = 1
+
+            # c. 猜测的数量必须严格大于玩家数量（> num_players）
+            # count_mask的索引 i 对应数量 i+1
+            # 要求 count > num_players，即索引从 num_players 开始（对应 count=num_players+1）
+            count_mask[self.num_players:] = 1
 
             return main_action_mask, mode_mask, count_mask, face_mask
 
@@ -229,7 +260,8 @@ class DQNAgent:
                     current_guess = Guess(mode=mode, count=count, face=face)
 
                     # 规则检验 2: 新猜测必须严格大于上一个猜测
-                    if is_strictly_greater(current_guess, last_guess):
+                    # 使用环境的规则作为单一真值来源
+                    if LiarDiceEnv._is_strictly_greater(current_guess, last_guess):
                         # 如果这个猜测合法，那么它的所有组成部分都是合法的
                         mode_mask[mode_idx] = 1
                         count_mask[count_idx] = 1
