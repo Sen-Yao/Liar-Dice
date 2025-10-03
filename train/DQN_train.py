@@ -1,3 +1,4 @@
+import math
 import os
 import random
 import torch
@@ -17,15 +18,98 @@ from agents.DQN_agent import DQNAgent
 from agents.heuristic_agent import HeuristicRuleAgent
 from utils import get_legal_actions
 
+
+def _build_action_masks(agent: DQNAgent, state_batch: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Return guess mask [B,2,C,6] and challenge legality [B] from state vectors."""
+
+    batch_size = state_batch.shape[0]
+    guess_masks = []
+    challenge_legals = []
+
+    zero_state = torch.zeros(agent.state_dim, device=state_batch.device)
+
+    for idx in range(batch_size):
+        state_vec = state_batch[idx]
+        if torch.allclose(state_vec, zero_state):
+            guess_masks.append(torch.zeros((2, agent.total_dice, 6), dtype=torch.bool, device=state_batch.device))
+            challenge_legals.append(False)
+            continue
+
+        mask = agent.build_guess_legal_mask(state_vec)
+        guess_masks.append(mask)
+        challenge_legals.append(agent.decode_last_guess_from_state(state_vec) is not None)
+
+    guess_mask_tensor = torch.stack(guess_masks, dim=0)
+    challenge_tensor = torch.tensor(challenge_legals, dtype=torch.bool, device=state_batch.device)
+
+    return guess_mask_tensor, challenge_tensor
+
+
+def _soft_update(target_net: nn.Module, source_net: nn.Module, tau: float) -> None:
+    """Polyak averaging of network parameters."""
+
+    for target_param, source_param in zip(target_net.parameters(), source_net.parameters()):
+        target_param.data.copy_(
+            tau * source_param.data + (1.0 - tau) * target_param.data
+        )
+
+
+def _binom_tail(n: int, p: float, r: int) -> float:
+    """Compute P[X >= r] for X~Bin(n,p)."""
+
+    if r <= 0:
+        return 1.0
+    if r > n:
+        return 0.0
+
+    q = 1.0 - p
+    prob = 0.0
+    for k in range(r, n + 1):
+        prob += math.comb(n, k) * (p ** k) * (q ** (n - k))
+    return float(min(max(prob, 0.0), 1.0))
+
+
+def _potential_from_state(agent: DQNAgent, state_tensor: torch.Tensor, beta: float) -> float:
+    """Potential based on estimated truth probability of the current last guess."""
+
+    if beta <= 0.0:
+        return 0.0
+
+    state_vec = state_tensor.squeeze(0)
+    last_guess = agent.decode_last_guess_from_state(state_vec)
+    if last_guess is None:
+        return 0.0
+
+    my_counts = state_vec[:6].cpu().numpy()
+    total_known = float(my_counts.sum())
+    total_dice = agent.total_dice
+    unknown = max(0, int(round(total_dice - total_known)))
+
+    ones = my_counts[0]
+    face_idx = last_guess.face - 1
+    face_count = my_counts[face_idx]
+
+    if last_guess.mode == '飞':
+        own = face_count + ones if last_guess.face != 1 else ones
+        success_prob = 2.0 / 6.0
+    else:
+        own = face_count
+        success_prob = 1.0 / 6.0
+
+    need = max(0, int(math.ceil(last_guess.count - own)))
+    prob_true = _binom_tail(unknown, success_prob, need)
+
+    return beta * (prob_true - 0.5)
+
 class ReplayBuffer:
     """Experience replay buffer for storing transitions"""
     def __init__(self, capacity: int):
         self.capacity = capacity
         self.buffer = deque(maxlen=capacity)
 
-    def push(self, state, action, reward, next_state, done):
+    def push(self, state, action, reward, next_state, done, discount):
         """Save a transition"""
-        self.buffer.append((state, action, reward, next_state, done))
+        self.buffer.append((state, action, reward, next_state, done, discount))
 
     def sample(self, batch_size: int) -> List:
         """Sample a batch of transitions"""
@@ -154,10 +238,15 @@ def train_dqn(agent: DQNAgent, env: LiarDiceEnv, args) -> Tuple[DQNAgent, Dict]:
     print(f"   Gamma: {args.gamma}")
     print(f"   Epsilon: {args.epsilon_start} → {args.epsilon_end}")
     print(f"   Target update frequency (steps): {args.target_update_freq}")
+    print(f"   Target soft tau: {getattr(args, 'target_soft_tau', 0.0)}")
+    print(f"   n-step return: {getattr(args, 'n_step', 1)}")
+    print(f"   Potential shaping beta: {getattr(args, 'shaping_beta', 0.0)}")
     print(f"   Rounds per episode: {getattr(args, 'rounds_per_episode', 1)}")
     print(f"   Updates per step (batched at round end): {getattr(args, 'updates_per_step', 1)}")
     print(f"   Warmup steps: {getattr(args, 'warmup_steps', 0)}")
     print(f"   Challenge suppress steps: {getattr(args, 'challenge_suppress_steps', 0)}")
+    print(f"   Opponent confidence: {getattr(args, 'opponent_conf_min', 0)} → {args.opponent_confidence}")
+    print(f"   Curriculum warmup: {getattr(args, 'curriculum_warmup', 0)} episodes")
 
     # Create models directory if it doesn't exist
     os.makedirs("./models", exist_ok=True)
@@ -181,11 +270,29 @@ def train_dqn(agent: DQNAgent, env: LiarDiceEnv, args) -> Tuple[DQNAgent, Dict]:
         episode_challenge_cnt = 0
         episode_early_challenge_cnt = 0
 
-        if args.frozen_opponent_update_interval > 0 and (episode % args.frozen_opponent_update_interval == 0):
+        curriculum_progress = min(
+            1.0,
+            episode / max(1, getattr(args, 'curriculum_warmup', 1))
+        )
+        base_conf = getattr(args, 'opponent_conf_min', args.opponent_confidence)
+        current_conf = int(round(
+            (1.0 - curriculum_progress) * base_conf
+            + curriculum_progress * args.opponent_confidence
+        ))
+        current_conf = max(0, current_conf)
+
+        base_interval = max(1, getattr(args, 'frozen_opponent_update_interval', 1))
+        growth_factor = max(1.0, getattr(args, 'frozen_interval_growth', 1.0))
+        effective_interval = max(
+            1,
+            int(round(base_interval * (1.0 + curriculum_progress * (growth_factor - 1.0))))
+        )
+
+        if effective_interval > 0 and (episode % effective_interval == 0):
             refresh_frozen_pool()
 
         opponents = {
-            pid: HeuristicRuleAgent(pid, env.num_players, confidence_threshold=args.opponent_confidence)
+            pid: HeuristicRuleAgent(pid, env.num_players, confidence_threshold=current_conf)
             for pid in env.possible_agents
             if pid != agent.agent_id
         }
@@ -224,13 +331,17 @@ def train_dqn(agent: DQNAgent, env: LiarDiceEnv, args) -> Tuple[DQNAgent, Dict]:
                             f"No legal actions available for {current_agent_id}. last_guess={observation.get('last_guess')}"
                         )
 
+                    suppress_steps = getattr(args, 'challenge_suppress_steps', 0)
+                    if getattr(args, 'shaping_beta', 0.0) > 0:
+                        suppress_steps = 0
+
                     action = select_action(
                         agent,
                         observation,
                         epsilon,
                         legal_actions,
                         round_step=round_step,
-                        challenge_suppress_steps=getattr(args, 'challenge_suppress_steps', 0)
+                        challenge_suppress_steps=suppress_steps
                     )
 
                     state_tensor = agent.get_state_vector(observation).unsqueeze(0)
@@ -271,7 +382,10 @@ def train_dqn(agent: DQNAgent, env: LiarDiceEnv, args) -> Tuple[DQNAgent, Dict]:
 
                     epsilon = max(min_epsilon, epsilon * args.epsilon_decay)
 
-                    if args.target_update_freq > 0 and (global_step % args.target_update_freq == 0):
+                    tau = getattr(args, 'target_soft_tau', 0.0)
+                    if tau and tau > 0:
+                        _soft_update(agent.target_network, agent.q_network, tau)
+                    elif args.target_update_freq > 0 and (global_step % args.target_update_freq == 0):
                         agent.target_network.load_state_dict(agent.q_network.state_dict())
 
                     if termination or truncation:
@@ -308,20 +422,54 @@ def train_dqn(agent: DQNAgent, env: LiarDiceEnv, args) -> Tuple[DQNAgent, Dict]:
                     step_data[-1]['done'] = True
 
             if step_data:
-                for i, data in enumerate(step_data):
-                    if i < len(step_data) - 1:
-                        data['next_state'] = step_data[i + 1]['state']
-                        data['done'] = False
+                shaping_beta = getattr(args, 'shaping_beta', 0.0)
+                if shaping_beta > 0:
+                    potentials = [
+                        _potential_from_state(agent, data['state'], shaping_beta)
+                        for data in step_data
+                    ]
+                    potentials.append(0.0)
+                    for idx, data in enumerate(step_data):
+                        phi_s = potentials[idx]
+                        phi_next = potentials[idx + 1] if idx + 1 < len(potentials) else 0.0
+                        shaping_reward = args.gamma * phi_next - phi_s
+                        data['reward'] += shaping_reward
+
+                n_step = max(1, getattr(args, 'n_step', 1))
+                gamma = args.gamma
+                zero_state = torch.zeros_like(step_data[0]['state'])
+
+                for i in range(len(step_data)):
+                    reward_sum = 0.0
+                    steps_taken = 0
+                    done_flag = False
+
+                    for j in range(n_step):
+                        idx = i + j
+                        if idx >= len(step_data):
+                            break
+
+                        reward_sum += (gamma ** j) * step_data[idx]['reward']
+                        steps_taken += 1
+
+                        if step_data[idx].get('done', False):
+                            done_flag = True
+                            break
+
+                    if not done_flag and (i + steps_taken) < len(step_data):
+                        next_state = step_data[i + steps_taken]['state']
+                        discount = gamma ** steps_taken
                     else:
-                        data['next_state'] = torch.zeros_like(data['state'])
-                        data['done'] = data.get('done', True)
+                        next_state = zero_state
+                        discount = 0.0
 
                     replay_buffer.push(
-                        data['state'],
-                        data['action'],
-                        data['reward'],
-                        data['next_state'],
-                        data['done']
+                        step_data[i]['state'],
+                        step_data[i]['action'],
+                        reward_sum,
+                        next_state,
+                        done_flag,
+                        discount
                     )
 
                 updates = getattr(args, 'updates_per_step', 1) * len(step_data)
@@ -334,9 +482,9 @@ def train_dqn(agent: DQNAgent, env: LiarDiceEnv, args) -> Tuple[DQNAgent, Dict]:
         eval_interval = getattr(args, "eval_interval", 0)
         eval_episodes = getattr(args, "eval_episodes", 0)
         if eval_interval > 0 and eval_episodes > 0 and (episode + 1) % eval_interval == 0:
-            win_rate = quick_evaluate(agent, args.num_players, eval_episodes, args.opponent_confidence)
+            win_rate = quick_evaluate(agent, args.num_players, eval_episodes, current_conf)
             print(
-                f"[Eval] episode={episode + 1} win_rate_vs_heuristic(conf={args.opponent_confidence}): {win_rate * 100:.1f}%"
+                f"[Eval] episode={episode + 1} win_rate_vs_heuristic(conf={current_conf}): {win_rate * 100:.1f}%"
             )
 
         if (
@@ -399,6 +547,7 @@ def train_agent_step(agent: DQNAgent, replay_buffer: ReplayBuffer, args) -> floa
     rewards = torch.tensor([data[2] for data in batch], dtype=torch.float32)
     next_states = torch.cat([data[3] for data in batch])
     dones = torch.tensor([data[4] for data in batch], dtype=torch.float32)
+    discounts = torch.tensor([data[5] for data in batch], dtype=torch.float32)
 
     # Extract action indices
     main_actions = actions[:, 0]  # Main action indices
@@ -409,53 +558,93 @@ def train_agent_step(agent: DQNAgent, replay_buffer: ReplayBuffer, args) -> floa
     # Current Q values
     current_q_main, current_q_mode, current_q_count, current_q_face = agent.q_network(states)
 
-    # Next Q values from target network
+    # Compose Q for executed actions
+    challenge_q = current_q_main[:, 1]
+    guess_q = (
+        current_q_main[:, 0]
+        + current_q_mode.gather(1, mode_actions.unsqueeze(1)).squeeze(1)
+        + current_q_count.gather(1, count_actions.unsqueeze(1)).squeeze(1)
+        + current_q_face.gather(1, face_actions.unsqueeze(1)).squeeze(1)
+    )
+
+    is_challenge = main_actions == 1
+    chosen_q = torch.where(is_challenge, challenge_q, guess_q)
+
     with torch.no_grad():
-        next_q_main, next_q_mode, next_q_count, next_q_face = agent.target_network(next_states)
+        next_q_main_t, next_q_mode_t, next_q_count_t, next_q_face_t = agent.target_network(next_states)
+        next_q_main_o, next_q_mode_o, next_q_count_o, next_q_face_o = agent.q_network(next_states)
 
-    # Compute target Q values for main action (used for both actions)
-    target_q_values = rewards + (1 - dones) * args.gamma * next_q_main.max(dim=1)[0]
+        guess_mask, challenge_legal = _build_action_masks(agent, next_states)
+        flat_mask = guess_mask.view(guess_mask.size(0), -1)
+        has_legal_guess = flat_mask.any(dim=1)
 
-    # Compute loss for each head
-    # For main action: use target_q_values
-    loss_main = nn.MSELoss()(current_q_main.gather(1, main_actions.unsqueeze(1)),
-                            target_q_values.unsqueeze(1))
+        # Online selection
+        guess_q_online = (
+            next_q_main_o[:, 0].view(-1, 1, 1, 1)
+            + next_q_mode_o.view(-1, 2, 1, 1)
+            + next_q_count_o.view(-1, 1, agent.total_dice, 1)
+            + next_q_face_o.view(-1, 1, 1, 6)
+        ).masked_fill(~guess_mask, float('-inf'))
 
-    # For other heads: use their own target values
-    # Only train other heads when main action is "guess" (index 0)
-    guess_mask = (main_actions == 0)
-
-    if guess_mask.sum() > 0:  # If there are any guess actions
-        # For mode, count, face heads, target is their own max next Q values
-        target_mode = rewards + (1 - dones) * args.gamma * next_q_mode.max(dim=1)[0]
-        target_count = rewards + (1 - dones) * args.gamma * next_q_count.max(dim=1)[0]
-        target_face = rewards + (1 - dones) * args.gamma * next_q_face.max(dim=1)[0]
-
-        # Only compute loss for guess actions
-        loss_mode = nn.MSELoss()(
-            current_q_mode[guess_mask].gather(1, mode_actions[guess_mask].unsqueeze(1)),
-            target_mode[guess_mask].unsqueeze(1)
+        guess_q_online_flat = guess_q_online.view(guess_q_online.size(0), -1)
+        best_guess_vals_online, best_guess_idx = guess_q_online_flat.max(dim=1)
+        best_guess_vals_online = torch.where(
+            has_legal_guess,
+            best_guess_vals_online,
+            torch.full_like(best_guess_vals_online, float('-inf'))
         )
-        loss_count = nn.MSELoss()(
-            current_q_count[guess_mask].gather(1, count_actions[guess_mask].unsqueeze(1)),
-            target_count[guess_mask].unsqueeze(1)
+        best_guess_idx = torch.where(
+            has_legal_guess,
+            best_guess_idx,
+            torch.zeros_like(best_guess_idx)
         )
-        loss_face = nn.MSELoss()(
-            current_q_face[guess_mask].gather(1, face_actions[guess_mask].unsqueeze(1)),
-            target_face[guess_mask].unsqueeze(1)
+
+        challenge_vals_online = next_q_main_o[:, 1]
+        challenge_vals_online = torch.where(
+            challenge_legal,
+            challenge_vals_online,
+            torch.full_like(challenge_vals_online, float('-inf'))
         )
-    else:
-        loss_mode = torch.tensor(0.0)
-        loss_count = torch.tensor(0.0)
-        loss_face = torch.tensor(0.0)
 
-    # Total loss
-    total_loss = loss_main + 0.3 * loss_mode + 0.3 * loss_count + 0.3 * loss_face
+        pick_challenge = challenge_vals_online >= best_guess_vals_online
 
-    # Optimize
+        # Target evaluation
+        guess_q_target = (
+            next_q_main_t[:, 0].view(-1, 1, 1, 1)
+            + next_q_mode_t.view(-1, 2, 1, 1)
+            + next_q_count_t.view(-1, 1, agent.total_dice, 1)
+            + next_q_face_t.view(-1, 1, 1, 6)
+        ).masked_fill(~guess_mask, float('-inf'))
+
+        best_guess_target = guess_q_target.view(guess_q_target.size(0), -1).gather(
+            1, best_guess_idx.unsqueeze(1)
+        ).squeeze(1)
+        best_guess_target = torch.where(
+            has_legal_guess,
+            best_guess_target,
+            torch.full_like(best_guess_target, float('-inf'))
+        )
+
+        best_next_q = torch.where(
+            pick_challenge,
+            next_q_main_t[:, 1],
+            best_guess_target
+        )
+
+        best_next_q = torch.where(
+            torch.isfinite(best_next_q),
+            best_next_q,
+            torch.zeros_like(best_next_q)
+        )
+
+    targets = rewards + (1 - dones) * discounts * best_next_q
+
+    loss_fn = nn.SmoothL1Loss()
+    loss = loss_fn(chosen_q, targets)
+
     agent.optimizer.zero_grad()
-    total_loss.backward()
+    loss.backward()
     torch.nn.utils.clip_grad_norm_(agent.q_network.parameters(), max_norm=1.0)
     agent.optimizer.step()
 
-    return total_loss.item()
+    return loss.item()
