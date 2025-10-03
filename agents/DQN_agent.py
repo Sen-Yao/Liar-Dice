@@ -1,11 +1,134 @@
+import math
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
+from pathlib import Path
 from typing import Dict
+import sys
 
-from env import Guess, Challenge, Action
-from utils import is_strictly_greater
+# Ensure project root on sys.path when running this module directly
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from env import Guess, Challenge, Action, LiarDiceEnv
+
+
+def _binom_tail(n: int, p: float, r: int) -> float:
+    if r <= 0:
+        return 1.0
+    if r > n:
+        return 0.0
+
+    q = 1.0 - p
+    prob = 0.0
+    for k in range(r, n + 1):
+        prob += math.comb(n, k) * (p ** k) * (q ** (n - k))
+    return float(min(max(prob, 0.0), 1.0))
+
+
+def _decode_last_guess_from_state(state_vec: torch.Tensor, num_players: int):
+    """Decode last guess information from a flattened state vector."""
+
+    if state_vec.numel() < 19:
+        return None
+
+    total_dice = num_players * 5
+    last_guess_ratio = state_vec[7].item()
+
+    # If there was no previous guess, all indicators stay at zero.
+    if last_guess_ratio <= 0.0:
+        return None
+
+    count_estimate = int(round(last_guess_ratio * total_dice))
+    if count_estimate <= 0:
+        return None
+
+    mode_slice = state_vec[14:16]
+    face_slice = state_vec[8:14]
+
+    if mode_slice.sum().item() <= 0:
+        return None
+
+    mode_idx = int(mode_slice.argmax().item())
+    face_idx = int(face_slice.argmax().item())
+
+    mode = '飞' if mode_idx == 0 else '斋'
+    face = face_idx + 1
+
+    return Guess(mode=mode, count=count_estimate, face=face)
+
+
+def _build_guess_legal_mask(state_vec: torch.Tensor, num_players: int) -> torch.Tensor:
+    """Construct legal mask [2, total_dice, 6] from encoded state."""
+
+    total_dice = num_players * 5
+    mask = torch.zeros((2, total_dice, 6), dtype=torch.bool, device=state_vec.device)
+
+    last_guess = _decode_last_guess_from_state(state_vec, num_players)
+
+    counts = torch.arange(1, total_dice + 1, device=state_vec.device)
+    faces = torch.arange(1, 7, device=state_vec.device)
+
+    if last_guess is None:
+        # First turn rules: count > num_players; 飞模式禁止 face==1
+        legal_counts = counts > num_players
+        mask[0, legal_counts, :] = True
+        mask[0, :, 0] = False  # face 1 illegal in 飞
+        mask[1, legal_counts, :] = True
+        return mask
+
+    old_count = last_guess.count
+    old_face = last_guess.face
+    old_mode = 0 if last_guess.mode == '飞' else 1
+
+    counts_grid = counts.view(1, -1, 1)
+    faces_grid = faces.view(1, 1, -1)
+
+    zhai_rank_lookup = torch.tensor([0, 5, 0, 1, 2, 3, 4], device=state_vec.device)
+    faces_rank = zhai_rank_lookup[faces.long()].view(1, 1, -1)
+    old_rank = zhai_rank_lookup[old_face]
+
+    if old_mode == 0:  # Last was 飞
+        fly_mask = ((counts_grid > old_count) |
+                    ((counts_grid == old_count) & (faces_grid > old_face)))
+        fly_mask = fly_mask & (faces_grid != 1)
+        mask[0] = fly_mask.squeeze(0)
+
+        ceil_half = (old_count + 1) // 2
+        zhai_mask = (counts_grid >= ceil_half)
+        mask[1] = zhai_mask.expand_as(fly_mask).squeeze(0)
+    else:  # Last was 斋
+        zhai_mask = ((counts_grid > old_count) |
+                     ((counts_grid == old_count) & (faces_rank > old_rank)))
+        mask[1] = zhai_mask.squeeze(0)
+
+        fly_mask = (counts_grid >= (old_count * 2)) & (faces_grid != 1)
+        mask[0] = fly_mask.squeeze(0)
+
+    return mask
+
+
+def _estimate_guess_truth_prob(my_counts: torch.Tensor, total_dice: int, guess: Guess) -> float:
+    if guess is None:
+        return 0.0
+
+    counts_np = my_counts.cpu().numpy()
+    ones = counts_np[0]
+    face_cnt = counts_np[guess.face - 1]
+
+    if guess.mode == '飞':
+        own = ones + (face_cnt if guess.face != 1 else 0)
+        success_prob = 2.0 / 6.0
+    else:
+        own = face_cnt
+        success_prob = 1.0 / 6.0
+
+    unknown = max(0, int(round(total_dice - counts_np.sum())))
+    need = max(0, int(math.ceil(guess.count - own)))
+
+    return _binom_tail(unknown, success_prob, need)
 
 class ParametricQNetwork(nn.Module):
     # 根据状态向量的输入, 判断各个动作的 Q 值
@@ -73,11 +196,12 @@ class DQNAgent:
     def __init__(self, agent_id: str, num_players: int, args, feature_dim=128,):
         self.agent_id = agent_id
         self.num_players = num_players
-        self.state_dim = 16
+        self.state_dim = 22  # 扩展特征：历史统计 + 概率估计 + 模式趋势
+        self.total_dice = 5 * self.num_players
 
         self.q_network = ParametricQNetwork(self.state_dim, num_players, feature_dim=feature_dim)
         self.target_network = ParametricQNetwork(self.state_dim, num_players, feature_dim=feature_dim)
-        
+
         # 创建之初，必须将主网络的权重完全复制给 Target 网络，确保它们从同一起点开始
         self.target_network.load_state_dict(self.q_network.state_dict())
 
@@ -87,84 +211,199 @@ class DQNAgent:
         # 定义优化器，只优化主网络的参数
         self.optimizer = optim.Adam(self.q_network.parameters(), lr=args.learning_rate)
 
+        # 为未来的循环网络扩展保留接口
+        self.hidden_state = None
+
+    def reset_hidden_state(self):
+        self.hidden_state = None
+
+    def detach_hidden_state(self):
+        if self.hidden_state is None:
+            return
+        if isinstance(self.hidden_state, tuple):
+            self.hidden_state = tuple(h.detach() for h in self.hidden_state)
+        else:
+            self.hidden_state = self.hidden_state.detach()
+
+    def decode_last_guess_from_state(self, state_vec: torch.Tensor):
+        return _decode_last_guess_from_state(state_vec.squeeze(), self.num_players)
+
+    def build_guess_legal_mask(self, state_vec: torch.Tensor) -> torch.Tensor:
+        return _build_guess_legal_mask(state_vec.squeeze(), self.num_players)
+
     def get_action(self, observation: Dict) -> Action:
         state_vec = self.get_state_vector(observation=observation)
-        main_action_q_values, mode_q_values, count_q_values, face_q_values = self.q_network(state_vec)
+        with torch.no_grad():
+            main_q, mode_q, count_q, face_q = self.q_network(state_vec)
 
-        # 其中 count_q_values 下标为 0 时表示个数 1, 其他同
+        device = state_vec.device
+        counts = torch.arange(1, self.total_dice + 1, device=device)
+        faces = torch.arange(1, 7, device=device)
 
-        # 基于 Q 网络的输出进行判断
-        # 但需要基于行动空间进行约束
+        # 计算所有组合的 Q 值网格：shape = [2(modes), total_dice(counts), 6(faces)]
+        q_grid = (main_q[0]
+                  + mode_q.view(2, 1, 1)
+                  + count_q.view(1, self.total_dice, 1)
+                  + face_q.view(1, 1, 6))
 
-        # mode, count, face = self.action_convert(mode_q_values=mode_q_values, count_q_values=count_q_values, face_q_values=face_q_values)
-        main_mask, mode_mask, count_mask, face_mask = self._create_masks(observation['last_guess'])
+        last_guess = observation['last_guess']
 
-        # 将非法动作的Q值设置为一个非常小的数
-        large_negative = -1e9
-        main_action_q_values += (1 - main_mask) * large_negative
-        mode_q_values += (1 - mode_mask) * large_negative
-        count_q_values += (1 - count_mask) * large_negative
-        face_q_values += (1 - face_mask) * large_negative
+        legal_mask = torch.zeros_like(q_grid, dtype=torch.bool)
+        counts_grid = counts.view(1, self.total_dice, 1)
+        faces_grid = faces.view(1, 1, 6)
 
-        q_value_of_bidding = main_action_q_values[0] + mode_q_values.max() + count_q_values.max() + face_q_values.max()
-        q_value_of_challenge = main_action_q_values[1]
+        if last_guess is None:
+            # 首轮：count > 玩家数，飞模式禁止 face=1
+            count_mask = (counts_grid > self.num_players)
+            flight_mask = count_mask & (faces_grid != 1)
 
-        if q_value_of_challenge > q_value_of_bidding:
+            legal_mask[0] = flight_mask.squeeze(0)
+            legal_mask[1] = count_mask.expand_as(flight_mask).squeeze(0)
+            q_challenge = torch.full((), -1e9, device=device)
+        else:
+            old_count = last_guess.count
+            old_face = last_guess.face
+            old_mode = 0 if last_guess.mode == '飞' else 1
+
+            zhai_rank_lookup = torch.tensor([0, 5, 0, 1, 2, 3, 4], device=device)
+            faces_rank = zhai_rank_lookup[faces.long()].view(1, 1, 6)
+            old_rank = zhai_rank_lookup[old_face]
+
+            # 同模式比较
+            if old_mode == 0:  # 上一个是飞
+                fly_mask = ((counts_grid > old_count) |
+                            ((counts_grid == old_count) & (faces_grid > old_face)))
+                fly_mask = fly_mask & (faces_grid != 1)
+                legal_mask[0] = fly_mask.squeeze(0)
+
+                ceil_half = (old_count + 1) // 2
+                zhai_mask = (counts_grid >= ceil_half)
+                legal_mask[1] = zhai_mask.expand_as(fly_mask).squeeze(0)
+            else:  # 上一个是斋
+                zhai_mask = ((counts_grid > old_count) |
+                             ((counts_grid == old_count) & (faces_rank > old_rank)))
+                legal_mask[1] = zhai_mask.squeeze(0)
+
+                fly_mask = (counts_grid >= (old_count * 2)) & (faces_grid != 1)
+                legal_mask[0] = fly_mask.squeeze(0)
+
+            q_challenge = main_q[1]
+
+        if not legal_mask.any():
+            # No legal guess remains; by rules the only option is to challenge.
             return Challenge()
-        
-        else:
-            # 根据被掩码后的 Q 值，选择最优参数
-            best_mode_idx = mode_q_values.argmax().item()
-            best_count_idx = count_q_values.argmax().item()
-            best_face_idx = face_q_values.argmax().item()
-            
-            # 将索引转换为游戏中的实际值
-            mode = '飞' if best_mode_idx == 0 else '斋'
-            count = best_count_idx + 1
-            face = best_face_idx + 1
 
-            return Guess(mode=mode, count=count, face=face)
+        masked_scores = q_grid.masked_fill(~legal_mask, -1e9)
+        best_flat_idx = masked_scores.view(-1).argmax()
+        best_mode_idx = (best_flat_idx // (self.total_dice * 6)).item()
+        remainder = best_flat_idx % (self.total_dice * 6)
+        best_count_idx = (remainder // 6).item()
+        best_face_idx = (remainder % 6).item()
 
+        best_guess_q = masked_scores[best_mode_idx, best_count_idx, best_face_idx]
 
-        
+        if q_challenge.item() > best_guess_q.item():
+            return Challenge()
+
+        mode = '飞' if best_mode_idx == 0 else '斋'
+        count = best_count_idx + 1
+        face = best_face_idx + 1
+        return Guess(mode=mode, count=count, face=face)
+
     def get_state_vector(self, observation: Dict):
-        # 将观测转换为一个长度为 6+1+1+6+2=16 的状态向量
-        my_dice_counts = torch.tensor(list(observation['my_dice_counts']))
-        num_players = torch.tensor((self.num_players, ))
-        last_guess = observation["last_guess"]
-        last_guess_face = [0, 0, 0, 0, 0, 0]
-        if last_guess == None:
-                last_guess_mode = torch.tensor((0, 0))
-                last_guess_num = torch.zeros(1)
-        else:
-            last_guess_face[last_guess.face-1] = 1
-            last_guess_num = torch.tensor((last_guess.count / (self.num_players * 5.0), ))
-            if last_guess.mode == '飞':
-                last_guess_mode = torch.tensor((1, 0))
-            else:
-                last_guess_mode = torch.tensor((0, 1))
-        last_guess_face = torch.tensor(last_guess_face)
-        state_vector = torch.cat([my_dice_counts, num_players, last_guess_num, last_guess_face, last_guess_mode], dim=0)
-        return state_vector
-        
-    def action_convert(self, mode_q_values, count_q_values, face_q_values):
-        # 根据网络预测的猜测动作 Q 值，将其转换为一个猜测三元组
-        # 此模块不负责检查动作合法性, 默认输入的 Q 值对应的动作是合法的猜测
-        # 猜测
-        if mode_q_values[0] > mode_q_values[1]:
-            mode = '飞'
-        else:
-            mode = '斋'
-        
-        _, count = torch.max(count_q_values)
-        # 从下标变成真正的个数, 需要加 1
-        count = count + 1
+        """将观测转换为状态向量（扩展到22维）
 
-        _, face = torch.max(face_q_values)
-        # 从下标变成真正的点数, 需要加 1
-        face = face + 1
-        return mode, count, face
-    
+        基础特征：
+        - my_dice_counts: 6维，手牌统计
+        - num_players: 1维，玩家总数
+        - last_guess_num: 1维，上次猜测个数（归一化）
+        - last_guess_face: 6维，上次猜测点数（one-hot）
+        - last_guess_mode: 2维，上次猜测模式（one-hot）
+
+        历史特征：
+        - current_round_progress: 当前轮次进度（history长度/总骰子数）
+        - history_avg_count: 本轮历史平均猜测个数（归一化）
+        - history_max_count: 本轮历史最大猜测个数（归一化）
+
+        新增记忆辅助特征：
+        - last_guess_truth_prob: 估计上次叫点为真的概率
+        - history_count_delta: 最近两次叫点数量差（归一化）
+        - history_mode_flip: 最近一次是否发生模式切换（0/1）
+        """
+        # 原有16维特征
+        my_dice_counts = torch.tensor(list(observation['my_dice_counts']), dtype=torch.float32)
+        num_players = torch.tensor([self.num_players], dtype=torch.float32)
+
+        last_guess = observation["last_guess"]
+        last_guess_face = [0.0] * 6
+
+        if last_guess is None:
+            last_guess_mode = torch.tensor([0.0, 0.0], dtype=torch.float32)
+            last_guess_num = torch.zeros(1, dtype=torch.float32)
+        else:
+            last_guess_face[last_guess.face - 1] = 1.0
+            last_guess_num = torch.tensor(
+                [last_guess.count / (self.num_players * 5.0)],
+                dtype=torch.float32
+            )
+
+            if last_guess.mode == '飞':
+                last_guess_mode = torch.tensor([1.0, 0.0], dtype=torch.float32)
+            else:
+                last_guess_mode = torch.tensor([0.0, 1.0], dtype=torch.float32)
+
+        last_guess_face = torch.tensor(last_guess_face, dtype=torch.float32)
+
+        # 新增历史统计 + 记忆特征
+        history = observation.get('game_round_history', [])
+        total_dice = self.num_players * 5.0
+
+        if len(history) > 0:
+            last_prob = _estimate_guess_truth_prob(my_dice_counts, self.total_dice, history[-1][1])
+        else:
+            last_prob = 0.0
+
+        if len(history) >= 2:
+            recent_delta = (history[-1][1].count - history[-2][1].count) / total_dice
+            recent_mode_flip = 1.0 if history[-1][1].mode != history[-2][1].mode else 0.0
+        else:
+            recent_delta = 0.0
+            recent_mode_flip = 0.0
+
+        if len(history) > 0:
+            # 当前轮次进度
+            current_round_progress = torch.tensor([len(history) / total_dice], dtype=torch.float32)
+
+            # 历史猜测个数统计
+            history_counts = [guess.count for _, guess in history]
+            history_avg_count = torch.tensor([np.mean(history_counts) / total_dice], dtype=torch.float32)
+            history_max_count = torch.tensor([max(history_counts) / total_dice], dtype=torch.float32)
+        else:
+            current_round_progress = torch.zeros(1, dtype=torch.float32)
+            history_avg_count = torch.zeros(1, dtype=torch.float32)
+            history_max_count = torch.zeros(1, dtype=torch.float32)
+
+        last_guess_prob = torch.tensor([last_prob], dtype=torch.float32)
+        history_delta = torch.tensor([recent_delta], dtype=torch.float32)
+        history_mode_flip = torch.tensor([recent_mode_flip], dtype=torch.float32)
+
+        # 拼接所有特征：6+1+1+6+2+1+1+1+3 = 22维
+        state_vector = torch.cat([
+            my_dice_counts,              # 6维：手牌统计
+            num_players,                  # 1维：玩家总数
+            last_guess_num,              # 1维：上次猜测个数
+            last_guess_face,             # 6维：上次猜测点数
+            last_guess_mode,             # 2维：上次猜测模式
+            current_round_progress,      # 1维：轮次进度
+            history_avg_count,           # 1维：历史平均猜测
+            history_max_count,           # 1维：历史最大猜测
+            last_guess_prob,             # 1维：上次叫点为真概率估计
+            history_delta,               # 1维：最近数量差
+            history_mode_flip            # 1维：最近是否切模
+        ], dim=0)
+
+        return state_vector.to(dtype=torch.float32)
+
     def _create_masks(self, last_guess):
         """
         根据当前观测值，为所有动作头创建掩码。
@@ -198,10 +437,11 @@ class DQNAgent:
             # b. 任何模式和点数都合法
             mode_mask[:] = 1
             face_mask[:] = 1
-            
-            # c. 猜测的数量必须大于等于玩家数量
-            # count_mask的索引 i 对应数量 i+1，所以数量 num_players 对应索引 num_players-1
-            count_mask[self.num_players - 1:] = 1
+
+            # c. 猜测的数量必须严格大于玩家数量（> num_players）
+            # count_mask的索引 i 对应数量 i+1
+            # 要求 count > num_players，即索引从 num_players 开始（对应 count=num_players+1）
+            count_mask[self.num_players:] = 1
 
             return main_action_mask, mode_mask, count_mask, face_mask
 
@@ -229,7 +469,8 @@ class DQNAgent:
                     current_guess = Guess(mode=mode, count=count, face=face)
 
                     # 规则检验 2: 新猜测必须严格大于上一个猜测
-                    if is_strictly_greater(current_guess, last_guess):
+                    # 使用环境的规则作为单一真值来源
+                    if LiarDiceEnv._is_strictly_greater(current_guess, last_guess):
                         # 如果这个猜测合法，那么它的所有组成部分都是合法的
                         mode_mask[mode_idx] = 1
                         count_mask[count_idx] = 1
