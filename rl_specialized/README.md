@@ -14,14 +14,17 @@
 运行：
 
 ```bash
-python -m rl_specialized.training.train_selfplay --num_players 2 --timesteps 2000000 --snapshot_freq 200000
+python -m rl_specialized.training.train_selfplay \
+  --num_players 2 \
+  --timesteps 400000 \
+  --snapshot_freq 20000
 ```
 
 要点：
-- 对手池初始包含多参数规则对手（起手面值∈{3,4,5}，挑战阈值偏移∈{2,3,4,5}）。
-- 规则体占比从 0.8 → 0.05（线性随训练进度下降）。
+- 对手池初始包含多参数规则对手（起手面值∈{3,4,5}，挑战阈值偏移∈{2,3,4,5}），以及概率型规则对手（`theta_challenge∈{0.20,0.25,0.30}`，`target_raise∈{0.55,0.60,0.65}`）。
+- 规则体占比线性退火：`0.8 → 0.02`（随训练进度下降），后期更偏向与策略快照对抗。
 - 每 `snapshot_freq` 步将当前策略保存并加入对手池（推断在 CPU 上进行，不占用训练设备显存）。
-- 观测与动作掩码与专用训练一致：`{'obs': state_vec, 'action_mask': mask}`。
+- 观测与动作掩码与专用训练一致：`{"obs": state_vec, "action_mask": mask}`。
 - 模型保存：
   - 快照：`runs/rl_selfplay/snapshots/snapshot_step_*.zip`
   - 最优：`runs/rl_selfplay/best_model/best_model.zip`
@@ -30,14 +33,14 @@ python -m rl_specialized.training.train_selfplay --num_players 2 --timesteps 200
 
 以下改动已在 `rl_specialized/training/train_selfplay.py` 生效，用于提升训练稳定性与评估泛化：
 
-- 学习率/剪切范围线性衰减：`lr 3e-4 → 5e-5`，`clip 0.2 → 0.1`（随进度线性）；新增 `linear_schedule`。
-- KL 目标约束：`target_kl=0.03`，抑制过激更新，降低回报震荡与策略崩塌风险。
-- 采样规模提升：`n_steps=2048`、`batch_size=256`、`gae_lambda=0.97`，降低梯度方差、提升稳定性。
-- 价值学习加强：`vf_coef=0.8`，并将自博弈默认网络宽度提升至 `256`（`features_dim=256`，`pi/vf` 两层MLP对称）。
-- 归一化：引入 `VecNormalize`（训练期仅对观测归一化，不归一化回报；评估与训练共享统计但不更新），评估更稳健。
-- 熵系数退火：`ent_coef 0.01 → 0.002` 随进度线性下降，前期鼓励探索、后期促使收敛。
-- 对手池日程：规则对手占比终值下调至 `0.05`，更早与策略快照及概率规则对手对抗，减少过拟合。
-- 评估：单次评估回合数增至 `20`；评估频率与 `n_steps` 对齐，并保存最优模型。
+- 学习率/剪切范围线性衰减：`lr 2e-4 → 5e-5`，`clip 0.2 → 0.1`（`linear_schedule`）。
+- KL 目标约束：`target_kl=0.05`，抑制过激更新，降低回报震荡与策略崩塌风险。
+- 采样规模与迭代：`n_steps=4096`、`batch_size=512`、`n_epochs=6`、`gae_lambda=0.95`、`gamma=0.98`，进一步降低梯度方差。
+- 网络与价值项：自博弈默认网络宽度 `256`（`features_dim=256`，`pi/vf` 两层 MLP 对称）；`vf_coef=0.7`。
+- 归一化：使用 `VecNormalize`，训练期仅归一化 `obs`，不归一化回报；评估与训练共享统计但不更新（`norm_obs_keys=["obs"]`）。
+- 熵系数退火：`ent_coef 0.02 → 0.005`，前期鼓励探索、后期促使收敛。
+- 对手池日程：规则对手占比终值 `0.02`，更早与策略快照和概率规则对手对抗，减少过拟合。
+- 评估：每 ~`max(2000, n_steps)` 步评估一次，`n_eval_episodes=20`，并保存最优模型。
 
 提示：如需继续强化稳定性，可进一步调低 `learning_rate_end`（如 `3e-5`）或调小 `target_kl`（如 `0.02`）；也可以将 `n_steps` 提升到 `4096`（训练更慢但更稳）。
 
@@ -53,8 +56,18 @@ python -m rl_specialized.training.train_selfplay --num_players 2 --timesteps 200
   - 期望总成功 E = 自己手牌成功数 + 未知骰子数 × p
   - Φ(s) = clip((E − 最后叫点count)/总骰子数, −1, 1)
 
-- 参数：在 `train_selfplay.py` 中默认 `β=0.05`，`γ` 与 PPO 的 `gamma` 保持一致（默认 0.99）。
+- 参数：在 `train_selfplay.py` 中默认 `β=0.05`，`γ` 与 PPO 的 `gamma` 保持一致（当前默认 0.98）。
 - 关闭方式：如需关闭，在创建 `LiarDiceSelfPlayEnv` 时将 `dense_shaping=False`。
+
+#### 对局行为塑形（默认开启，随训练退火）
+
+- 目的：延长对局、鼓励前期进行合理的加注博弈，避免过早挑战导致的极短回合和稀疏回报。
+- 机制：
+  - 过早挑战软惩罚：若历史叫点数少于阈值，RL 选择 Challenge 会被扣少量 shaping 分（默认阈值 `early_challenge_min_raises=2`，惩罚 `early_challenge_penalty=0.2`）。
+  - 合法加注奖励：RL 选择 Guess 时给予小额奖励（默认 `guess_step_bonus=0.02`）。
+  - 掩码抑制：在阈值内且存在其他合法 Guess 时，临时隐藏 Challenge 动作（仅训练期）。
+- 退火：上述三项强度随训练进度线性减弱至 0（回调动态更新）。
+- 关闭方式：在创建 `LiarDiceSelfPlayEnv` 时将对应参数设为 0。
 
 ## 🏗️ 架构设计
 
@@ -136,14 +149,15 @@ total_actions = 1 (challenge) + 2 * counts_per_mode * 6 = 97
 
 ### 3. StateEncoder (state_encoder.py)
 - 将复杂游戏状态编码为神经网络输入
-- 固定长度特征向量：手牌(6) + 玩家信息(n) + 猜测(4) + 游戏状态(3)
+- 固定长度特征向量：手牌(6) + 玩家信息(n) + 猜测(4) + 游戏状态(3) + 历史(4×N)
+  - 历史特征默认 N=3（每步 4 维：mode/count/face/player_idx，均做归一化）；设 `history_length=0` 可保持旧模型兼容。
 - 兼容环境返回的 Guess（dataclass）与 dict 的 last_guess
 - 支持批量编码和特征名称映射
 
 ### 4. Policy Network (networks/policy_network.py)
 - 面向数值型状态的高效 MLP + 残差结构
 - 架构：LayerNorm → Linear → 2×ResidualBlock(Linear+SiLU+Dropout→Linear+残差+LayerNorm) → Linear
-- 默认输出特征维度 `features_dim=128`，便于策略/价值头共享
+- 默认输出特征维度 `features_dim=128`（自博弈训练中通过 `PolicyNetConfig` 默认提升至 256），便于策略/价值头共享
 - 提供 `MaskedStateFeatureExtractor` 用于与 SB3 集成（从观察中注入动作掩码）
 - 提供 `make_default_policy_kwargs()` 辅助函数，用于生成 SB3 的 `policy_kwargs`
 
@@ -197,6 +211,25 @@ batch_states = encoder.encode_batch(observations)
 - **训练速度**：减少无效动作探索，加快收敛
 - **模型精度**：专门优化，避免通用模型的性能妥协
 - **可解释性**：每个模型对应明确的游戏配置
+
+## 🧪 评估/基准
+
+- 自博弈专用评估脚本：`rl_specialized/test_selfplay_model.py`
+- 作用：加载训练产出的模型与对手池配置，运行一批评估回合并输出摘要（胜率/平均回报/平均步数）。
+
+示例：
+
+```bash
+# 使用最新最优模型，评估 25 回合
+python -m rl_specialized.test_selfplay_model --episodes 25
+
+# 指定某次快照作为评估模型，并尝试复用 VecNormalize 统计
+python -m rl_specialized.test_selfplay_model \
+  --model-path runs/rl_selfplay/snapshots/snapshot_step_200000.zip \
+  --norm-path runs/rl_selfplay/vecnormalize.pkl
+```
+
+提示：评估默认关闭训练期的奖励塑形与早期挑战惩罚（保证回报与胜负直接对应）。如需与训练时一致，可加 `--keep-shaping` 与 `--keep-early-penalty`。
 
 ### 适用场景
 - 固定玩家数量的游戏环境
