@@ -358,7 +358,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--eval-episodes",
         type=int,
-        default=100,
+        default=1000,
         help="Number of evaluation episodes to run automatically (default: 10)",
     )
     parser.add_argument(
