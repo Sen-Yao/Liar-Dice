@@ -36,19 +36,20 @@ class SelfPlayConfig:
     dice_per_player: int = 5
     total_timesteps: int = 50_000  # 可通过命令行覆盖
     # 学习率与更新规模优化
-    learning_rate: float = 3e-4
+    learning_rate: float = 2e-4
     learning_rate_end: float = 5e-5
     policy_hidden_size: int = 256
-    n_steps: int = 2048
-    batch_size: int = 256
-    gamma: float = 0.99
-    gae_lambda: float = 0.97
+    n_steps: int = 4096
+    n_epochs: int = 6
+    batch_size: int = 512
+    gamma: float = 0.98
+    gae_lambda: float = 0.95
     clip_range: float = 0.2
     clip_range_end: float = 0.1
-    ent_coef_start: float = 0.01
-    ent_coef_end: float = 0.002
-    vf_coef: float = 0.8
-    target_kl: float = 0.03
+    ent_coef_start: float = 0.02
+    ent_coef_end: float = 0.005
+    vf_coef: float = 0.7
+    target_kl: float = 0.05
     seed: Optional[int] = 42
     device: Optional[str] = None
     tensorboard_log: Optional[str] = "runs/rl_selfplay"
@@ -78,6 +79,7 @@ class SelfPlayCallback(BaseCallback):
         self.cfg = cfg
         self.save_dir = save_dir
         self._next_snapshot = cfg.snapshot_freq
+        self._log_interval = 2_000
 
     def _on_step(self) -> bool:
         # 更新规则体占比：线性从 start 到 end
@@ -89,19 +91,30 @@ class SelfPlayCallback(BaseCallback):
         try:
             if hasattr(self.model, "ent_coef"):
                 ent = (1 - progress) * self.cfg.ent_coef_start + progress * self.cfg.ent_coef_end
-                self.model.ent_coef = float(ent)
+                value = float(ent)
+                self.model.ent_coef = value
+                if hasattr(self.model, "ent_coef_tensor"):
+                    self.model.ent_coef_tensor = th.tensor(value, device=self.model.device)
         except Exception:
             pass
 
-        # 每1000步打印一次进度和对手信息
-        if self.num_timesteps % 1000 == 0:
+        # 定期输出训练摘要
+        if self.num_timesteps % self._log_interval == 0 or self.num_timesteps == 1:
             stats = self.pool.get_usage_stats()
             pool_summary = self.pool.get_pool_summary()
-            print(f"训练步数: {self.num_timesteps}/{self.cfg.total_timesteps}, 规则对手占比: {ratio:.2f}, 进度: {progress*100:.1f}%")
+            print(f"训练步数: {self.num_timesteps:,}/{self.cfg.total_timesteps:,} (进度 {progress*100:.1f}%), 规则对手占比: {ratio:.2f}")
             print(f"对手池: {pool_summary}")
             if sum(stats.values()) > 0:
-                print(f"使用统计: 基础规则{stats['basic_rule']:.0f}% | 概率规则{stats['prob_rule']:.0f}% | 策略快照{stats['policy']:.0f}%")
-            print("-" * 50)
+                print(
+                    "使用统计: 基础规则{basic:.0f}% | 概率规则{prob:.0f}% | 策略快照{policy:.0f}%".format(
+                        basic=stats.get('basic_rule', 0.0),
+                        prob=stats.get('prob_rule', 0.0),
+                        policy=stats.get('policy', 0.0),
+                    )
+                )
+            print("当前熵系数: {:.4f}".format(getattr(self.model, "ent_coef", 0.0)))
+            print("-" * 60)
+            self.pool.reset_stats()
 
         # 到达快照点：保存并注册为对手
         if self.num_timesteps >= self._next_snapshot:
@@ -150,9 +163,9 @@ class SelfPlayTrainer:
             env = make_env()
             return Monitor(env)  # 添加Monitor包装解决警告
 
-        # 归一化包装：训练更新统计，评估仅使用统计不更新
+        # 归一化包装：训练期仅归一化观测，不归一化奖励；评估仅使用统计不更新
         self.train_env = VecNormalize(
-            DummyVecEnv([make_env_with_monitor]), norm_obs=True, norm_reward=True, clip_obs=10.0,
+            DummyVecEnv([make_env_with_monitor]), norm_obs=True, norm_reward=False, clip_obs=10.0,
             norm_obs_keys=["obs"]  # 只归一化 obs 部分，不归一化 action_mask
         )
         self.eval_env = VecNormalize(
@@ -175,10 +188,12 @@ class SelfPlayTrainer:
             env=self.train_env,
             learning_rate=linear_schedule(cfg.learning_rate, cfg.learning_rate_end),
             n_steps=cfg.n_steps,
+            n_epochs=cfg.n_epochs,
             batch_size=cfg.batch_size,
             gamma=cfg.gamma,
             gae_lambda=cfg.gae_lambda,
             clip_range=linear_schedule(cfg.clip_range, cfg.clip_range_end),
+            clip_range_vf=1.0,
             ent_coef=cfg.ent_coef_start,
             vf_coef=cfg.vf_coef,
             target_kl=cfg.target_kl,
@@ -192,7 +207,7 @@ class SelfPlayTrainer:
     def train(self):
         print(f"开始训练 - 总步数: {self.cfg.total_timesteps}, 玩家数: {self.cfg.num_players}, 设备: {self.cfg.device}")
         print(f"网络配置 - 隐藏层大小: {self.cfg.policy_hidden_size}, 学习率: {self.cfg.learning_rate}")
-        print(f"PPO参数 - n_steps: {self.cfg.n_steps}, batch_size: {self.cfg.batch_size}")
+        print(f"PPO参数 - n_steps: {self.cfg.n_steps}, n_epochs: {self.cfg.n_epochs}, batch_size: {self.cfg.batch_size}")
         print(f"对手池初始配置: {self.pool.get_pool_summary()}")
         print(f"规则对手占比: {self.cfg.rule_ratio_start:.1f} → {self.cfg.rule_ratio_end:.1f}")
         print("-" * 60)

@@ -54,6 +54,7 @@ class LiarDiceSingleAgentEnv(gym.Env):
         self._env: Optional[LiarDiceEnv] = None
         self._opponents: Dict[str, BasicRuleAgent] = {}
         self._rl_agent_id = "player_0"
+        self._pending_reset_reward: float = 0.0
 
     # --- Helpers ---
     def _build_obs(self) -> Dict[str, np.ndarray]:
@@ -77,8 +78,9 @@ class LiarDiceSingleAgentEnv(gym.Env):
             action = opp.get_action(obs)
             self._env.step(action)
             total_reward += float(self._env.rewards.get(self._rl_agent_id, 0))
-            if all(self._env.terminations.get(a, False) for a in self._env.agents):
-                terminated = True
+            terminated = all(self._env.terminations.get(a, False) for a in self._env.agents)
+            truncated = all(self._env.truncations.get(a, False) for a in self._env.agents)
+            if terminated or truncated:
                 break
         return total_reward, terminated, truncated
 
@@ -101,7 +103,41 @@ class LiarDiceSingleAgentEnv(gym.Env):
                 self._opponents[agent_id] = BasicRuleAgent(agent_id=agent_id, num_players=self.num_players)
 
         # 可能一开始就不是 RL 的回合，推进到 RL 或回合结束
-        reward, terminated, truncated = self._step_opponents_until_rl_turn_or_done()
+        self._pending_reset_reward = 0.0
+        first_seed = seed
+        attempts = 0
+        max_attempts = 64
+
+        while True:
+            reward, terminated, truncated = self._step_opponents_until_rl_turn_or_done()
+            self._pending_reset_reward += reward
+
+            if not (terminated or truncated):
+                if self._env.agent_selection == self._rl_agent_id:
+                    break
+                attempts += 1
+                if attempts >= max_attempts:
+                    raise RuntimeError(
+                        "Opponent stepping did not reach RL agent turn;"
+                        f" attempts={attempts}, agent_selection={self._env.agent_selection}"
+                    )
+                continue
+
+            attempts += 1
+            if attempts >= max_attempts:
+                raise RuntimeError(
+                    "Unable to reach RL agent turn after repeated resets;"
+                    f" attempts={attempts}, max_attempts={max_attempts},"
+                    f" agent_selection={self._env.agent_selection},"
+                    f" term_all={all(self._env.terminations.values())},"
+                    f" trunc_all={all(self._env.truncations.values())}"
+                )
+
+            self._env.reset(seed=first_seed)
+            first_seed = None
+            # 清空上一局奖励，避免跨局累计
+            self._pending_reset_reward = 0.0
+
         obs = self._build_obs()
         info = {}
         return obs, info
@@ -114,18 +150,19 @@ class LiarDiceSingleAgentEnv(gym.Env):
         action_obj = self._env.action_to_object(action)
         self._env.step(action_obj)
 
-        reward_rl = float(self._env.rewards.get(self._rl_agent_id, 0))
+        reward_rl = self._pending_reset_reward + float(self._env.rewards.get(self._rl_agent_id, 0))
+        self._pending_reset_reward = 0.0
         terminated = all(self._env.terminations.get(a, False) for a in self._env.agents)
-        truncated = False
+        truncated = all(self._env.truncations.get(a, False) for a in self._env.agents)
 
-        if not terminated:
+        if not (terminated or truncated):
             # 推进对手
             r2, term2, trunc2 = self._step_opponents_until_rl_turn_or_done()
             reward_rl += r2
             terminated = term2 or terminated
             truncated = trunc2 or truncated
 
-        if terminated:
+        if terminated or truncated:
             obs = self.observation_space.sample()
             # 返回一个占位观测，不会继续使用
         else:
@@ -199,6 +236,35 @@ class PolicyOpponent:
         return f"策略快照({filename})"
 
     def predict_action_id(self, obs_dict: Dict) -> int:
+        # 形状校验：在状态编码维度变更（如加入历史）后，旧快照将不兼容
+        try:
+            model_obs_space = getattr(self.model, 'observation_space', None)
+            if isinstance(model_obs_space, gym.spaces.Dict):
+                trained_dim = int(model_obs_space["obs"].shape[0])
+                current_dim = int(obs_dict["obs"].shape[-1])
+                if current_dim != trained_dim:
+                    dim_diff = current_dim - trained_dim
+                    # 推断可能的原因
+                    if dim_diff == 12:
+                        reason = "状态编码已扩展历史特征（新27维 vs 旧15维，2人游戏）"
+                    elif dim_diff == -12:
+                        reason = "状态编码已移除历史特征（或使用了旧快照）"
+                    elif abs(dim_diff) <= 5:
+                        reason = f"玩家数量可能变化（维度差异: {dim_diff}）"
+                    else:
+                        reason = f"编码方案或配置变化（维度差异: {dim_diff}）"
+
+                    raise RuntimeError(
+                        f"不兼容的策略快照: {reason}. "
+                        f"快照维度={trained_dim}, 当前维度={current_dim}. "
+                        f"请移除旧快照或使用兼容的状态编码重新训练。"
+                    )
+        except RuntimeError:
+            raise
+        except Exception:
+            # 若检查失败不影响正常预测，仅作软失败
+            pass
+
         action, _ = self.model.predict(obs_dict, deterministic=True)
         return int(action)
 
@@ -340,6 +406,7 @@ class LiarDiceSelfPlayEnv(gym.Env):
         self._seat_opponents: Dict[str, Any] = {}
         # 用于塑形的上一步势能
         self._last_phi: float = 0.0
+        self._pending_reset_reward: float = 0.0
 
     # 势函数 Phi(s)：基于最后叫点和己方手牌的成功期望，范围约 [-1, 1]
     def _phi(self, raw_obs: Dict) -> float:
@@ -404,8 +471,9 @@ class LiarDiceSelfPlayEnv(gym.Env):
 
             self._env.step(action)
             total_reward += float(self._env.rewards.get(self._rl_agent_id, 0))
-            if all(self._env.terminations.get(a, False) for a in self._env.agents):
-                terminated = True
+            terminated = all(self._env.terminations.get(a, False) for a in self._env.agents)
+            truncated = all(self._env.truncations.get(a, False) for a in self._env.agents)
+            if terminated or truncated:
                 break
         return total_reward, terminated, truncated
 
@@ -420,25 +488,64 @@ class LiarDiceSelfPlayEnv(gym.Env):
         )
         self._env.reset(seed=seed)
 
-        # 为每个非RL座位从对手池采样一个对手
-        self._seat_opponents = {}
-        opponent_descriptions = []
-        for i in range(self.num_players):
-            aid = f"player_{i}"
-            if aid != self._rl_agent_id:
+        def reseat_opponents() -> List[str]:
+            self._seat_opponents = {}
+            descriptions: List[str] = []
+            for i in range(self.num_players):
+                aid = f"player_{i}"
+                if aid == self._rl_agent_id:
+                    continue
                 opponent = self.pool.sample()
                 self._seat_opponents[aid] = opponent
                 if hasattr(opponent, 'get_description'):
-                    opponent_descriptions.append(opponent.get_description())
+                    descriptions.append(opponent.get_description())
                 else:
-                    opponent_descriptions.append("未知对手")
+                    descriptions.append("未知对手")
+            return descriptions
 
-        # 输出对手信息（仅在需要时）
-        if len(opponent_descriptions) > 0 and hasattr(self, '_show_opponent_info') and self._show_opponent_info:
+        opponent_descriptions = reseat_opponents()
+
+        if opponent_descriptions and getattr(self, '_show_opponent_info', False):
             print(f"对手配置: {', '.join(opponent_descriptions)}")
 
-        # 如开局不是RL，推进到RL或结束
-        self._step_opponents_until_rl_turn_or_done()
+        self._pending_reset_reward = 0.0
+        first_seed = seed
+        attempts = 0
+        max_attempts = 64
+
+        while True:
+            reward, terminated, truncated = self._step_opponents_until_rl_turn_or_done()
+            self._pending_reset_reward += reward
+
+            if not (terminated or truncated):
+                if self._env.agent_selection == self._rl_agent_id:
+                    break
+                attempts += 1
+                if attempts >= max_attempts:
+                    raise RuntimeError(
+                        "Opponent stepping did not yield RL agent turn;"
+                        f" attempts={attempts}, agent_selection={self._env.agent_selection}"
+                    )
+                continue
+
+            attempts += 1
+            if attempts >= max_attempts:
+                raise RuntimeError(
+                    "Unable to reach RL agent turn after repeated self-play resets;"
+                    f" attempts={attempts}, max_attempts={max_attempts},"
+                    f" agent_selection={self._env.agent_selection},"
+                    f" term_all={all(self._env.terminations.values())},"
+                    f" trunc_all={all(self._env.truncations.values())}"
+                )
+
+            self._env.reset(seed=first_seed)
+            first_seed = None
+            # 清空上一局奖励，避免跨局累计
+            self._pending_reset_reward = 0.0
+            opponent_descriptions = reseat_opponents()
+            if opponent_descriptions and getattr(self, '_show_opponent_info', False):
+                print(f"对手配置: {', '.join(opponent_descriptions)}")
+
         # 初始化势能（用于塑形）
         raw_obs = self._env.observe(self._rl_agent_id)
         self._last_phi = self._phi(raw_obs) if self.dense_shaping else 0.0
@@ -452,11 +559,12 @@ class LiarDiceSelfPlayEnv(gym.Env):
         action_obj = self._env.action_to_object(action)
         self._env.step(action_obj)
 
-        reward_rl = float(self._env.rewards.get(self._rl_agent_id, 0))
+        reward_rl = self._pending_reset_reward + float(self._env.rewards.get(self._rl_agent_id, 0))
+        self._pending_reset_reward = 0.0
         terminated = all(self._env.terminations.get(a, False) for a in self._env.agents)
-        truncated = False
+        truncated = all(self._env.truncations.get(a, False) for a in self._env.agents)
 
-        if not terminated:
+        if not (terminated or truncated):
             r2, term2, trunc2 = self._step_opponents_until_rl_turn_or_done()
             reward_rl += r2
             terminated = term2 or terminated
@@ -464,7 +572,7 @@ class LiarDiceSelfPlayEnv(gym.Env):
 
         # 潜在塑形：β * (γ * Phi(s') - Phi(s))
         if self.dense_shaping:
-            if terminated:
+            if terminated or truncated:
                 phi_sp = 0.0
             else:
                 raw_obs_sp = self._env.observe(self._rl_agent_id)
@@ -472,7 +580,10 @@ class LiarDiceSelfPlayEnv(gym.Env):
             reward_rl += self.shaping_beta * (self.shaping_gamma * phi_sp - self._last_phi)
             self._last_phi = phi_sp
 
-        obs = self.observation_space.sample() if terminated else self._build_obs_for_agent(self._rl_agent_id)
+        if terminated or truncated:
+            obs = self.observation_space.sample()
+        else:
+            obs = self._build_obs_for_agent(self._rl_agent_id)
         info = {}
         return obs, reward_rl, terminated, truncated, info
 
