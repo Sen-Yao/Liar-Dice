@@ -57,6 +57,10 @@ class SelfPlayConfig:
     snapshot_freq: int = 2_000
     rule_ratio_start: float = 0.8
     rule_ratio_end: float = 0.02
+    # 行为塑形（延长对局）
+    early_challenge_min_raises: int = 2
+    early_challenge_penalty: float = 0.2
+    guess_step_bonus: float = 0.02
 
 
 def linear_schedule(start: float, end: float) -> Callable[[float], float]:
@@ -104,6 +108,13 @@ class SelfPlayCallback(BaseCallback):
                 if hasattr(self.model, "ent_coef_tensor"):
                     self.model.ent_coef_tensor = th.tensor(value, device=self.model.device)
         except Exception:
+            pass
+
+        # 渐退“早期挑战抑制”和“加注奖励”，随训练进度线性减弱至 0
+        try:
+            self._update_env_behavior_shaping(progress)
+        except Exception:
+            # 环境嵌套路径可能变化，静默失败即可
             pass
 
         # 定期输出训练摘要
@@ -193,6 +204,40 @@ class SelfPlayCallback(BaseCallback):
         except Exception as e:
             # 静默失败，不影响训练
             pass
+
+    # 尝试访问底层环境并根据进度调整“早期挑战抑制/加注奖励”强度
+    def _update_env_behavior_shaping(self, progress: float) -> None:
+        # 线性退火：从 cfg.* -> 0
+        min_raises0 = int(max(0, self.cfg.early_challenge_min_raises))
+        penalty0 = float(max(0.0, self.cfg.early_challenge_penalty))
+        bonus0 = float(max(0.0, self.cfg.guess_step_bonus))
+
+        # min_raises: 四舍五入到整数，末期降至 0
+        min_raises = int(round((1.0 - progress) * min_raises0))
+        penalty = (1.0 - progress) * penalty0
+        bonus = (1.0 - progress) * bonus0
+
+        # 取出底层单环境（VecNormalize -> DummyVecEnv -> Monitor -> LiarDiceSelfPlayEnv）
+        venv = getattr(self.model, 'env', None)
+        if venv is None:
+            return
+        # VecNormalize
+        venv = getattr(venv, 'venv', venv)
+        # DummyVecEnv
+        envs = getattr(venv, 'envs', None)
+        if not envs:
+            return
+        base = envs[0]
+        # Monitor -> unwrap to actual env
+        env_obj = getattr(base, 'env', base)
+
+        # 防御式检查：目标属性存在才更新
+        if hasattr(env_obj, 'early_challenge_min_raises'):
+            setattr(env_obj, 'early_challenge_min_raises', int(min_raises))
+        if hasattr(env_obj, 'early_challenge_penalty'):
+            setattr(env_obj, 'early_challenge_penalty', float(penalty))
+        if hasattr(env_obj, 'guess_step_bonus'):
+            setattr(env_obj, 'guess_step_bonus', float(bonus))
 
     def _print_diagnostic(self, progress: float):
         """输出详细的训练诊断信息"""
@@ -409,6 +454,9 @@ class SelfPlayTrainer:
                 dense_shaping=True,
                 shaping_beta=0.05,
                 shaping_gamma=cfg.gamma,
+                early_challenge_min_raises=cfg.early_challenge_min_raises,
+                early_challenge_penalty=cfg.early_challenge_penalty,
+                guess_step_bonus=cfg.guess_step_bonus,
                 show_opponent_info=False,  # 在训练时不显示详细对手信息
             )
 
@@ -498,7 +546,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--num_players", type=int, default=2)
     parser.add_argument("--dice_per_player", type=int, default=5)
-    parser.add_argument("--timesteps", type=int, default=2_000_000)
+    parser.add_argument("--timesteps", type=int, default=400_000)
     parser.add_argument("--snapshot_freq", type=int, default=20_000)
     parser.add_argument("--device", type=str, default=None, choices=["cuda", "mps", "cpu", None])
     parser.add_argument("--logdir", type=str, default="runs/rl_selfplay")

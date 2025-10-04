@@ -372,6 +372,12 @@ class LiarDiceSelfPlayEnv(gym.Env):
         dense_shaping: bool = True,
         shaping_beta: float = 0.05,
         shaping_gamma: float = 0.99,
+        # 训练期行为塑形（鼓励更长对局）：
+        # - 过早挑战的软惩罚（在叫点数较少时，RL 选择 Challenge 会被小幅扣分）
+        # - 合法加注的小额奖励（每次 RL 选择 Guess 会给小额 shaping 奖励）
+        early_challenge_min_raises: int = 2,
+        early_challenge_penalty: float = 0.2,
+        guess_step_bonus: float = 0.02,
         show_opponent_info: bool = False,
     ):
         super().__init__()
@@ -384,6 +390,10 @@ class LiarDiceSelfPlayEnv(gym.Env):
         self.dense_shaping = dense_shaping
         self.shaping_beta = float(shaping_beta)
         self.shaping_gamma = float(shaping_gamma)
+        # 行为塑形参数
+        self.early_challenge_min_raises = int(max(0, early_challenge_min_raises))
+        self.early_challenge_penalty = float(max(0.0, early_challenge_penalty))
+        self.guess_step_bonus = float(max(0.0, guess_step_bonus))
         self._show_opponent_info = show_opponent_info
 
         # 专用动作空间尺寸（与 LiarDiceSingleAgentEnv 相同计算）
@@ -446,6 +456,15 @@ class LiarDiceSelfPlayEnv(gym.Env):
         obs_dict = self._env.observe(agent_id)
         state_vec = self._encoder.encode_observation(obs_dict)
         mask = self._env.get_action_mask(obs_dict)
+        # 训练期软约束：在回合早期（叫点数少于阈值）隐藏 Challenge 动作，鼓励先进行加注博弈
+        if (
+            agent_id == self._rl_agent_id
+            and self.early_challenge_min_raises > 0
+            and len(self._env.round_history) < self.early_challenge_min_raises
+        ):
+            # 仅在存在其他合法 Guess 动作时，才隐藏 Challenge，避免掩码全False
+            if mask.shape[0] > 1 and np.any(mask[1:]):
+                mask[0] = False
         return {"obs": state_vec.astype(np.float32), "action_mask": mask.astype(np.int8)}
 
     def _step_opponents_until_rl_turn_or_done(self) -> Tuple[float, bool, bool]:
@@ -557,6 +576,8 @@ class LiarDiceSelfPlayEnv(gym.Env):
         assert self._env is not None
         assert self._env.agent_selection == self._rl_agent_id
         action_obj = self._env.action_to_object(action)
+        # 记录 RL 动作前的历史长度，用于判定“过早挑战”
+        history_len_before = len(self._env.round_history)
         self._env.step(action_obj)
 
         reward_rl = self._pending_reset_reward + float(self._env.rewards.get(self._rl_agent_id, 0))
@@ -569,6 +590,20 @@ class LiarDiceSelfPlayEnv(gym.Env):
             reward_rl += r2
             terminated = term2 or terminated
             truncated = trunc2 or truncated
+
+        # 训练期行为塑形：
+        # 1) 过早挑战的软惩罚：若历史叫点不足阈值且本次动作为 Challenge，则扣少量 shaping 分。
+        # 2) 合法加注的小额奖励：若 RL 本次选择的是 Guess，则给予小额 shaping 奖励。
+        try:
+            from env import Challenge as _Challenge, Guess as _Guess  # 仅作类型比较
+        except Exception:
+            _Challenge, _Guess = None, None
+        if _Challenge is not None and isinstance(action_obj, _Challenge):
+            if history_len_before < self.early_challenge_min_raises and self.early_challenge_penalty > 0.0:
+                reward_rl -= self.early_challenge_penalty
+        elif _Guess is not None and isinstance(action_obj, _Guess):
+            if self.guess_step_bonus > 0.0:
+                reward_rl += self.guess_step_bonus
 
         # 潜在塑形：β * (γ * Phi(s') - Phi(s))
         if self.dense_shaping:
