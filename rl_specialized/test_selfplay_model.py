@@ -81,8 +81,14 @@ from rl_specialized.training.train_selfplay import SelfPlayConfig, auto_select_d
 from rl_specialized.training.env_wrappers import OpponentPool, LiarDiceSelfPlayEnv
 
 
-def build_opponent_pool(cfg: SelfPlayConfig, *, snapshots: List[Path], device: str) -> OpponentPool:
-    """Recreate the opponent pool used during self-play training."""
+def build_opponent_pool(
+    cfg: SelfPlayConfig,
+    *,
+    snapshots: List[Path],
+    load_snapshots: bool,
+    device: str,
+) -> OpponentPool:
+    """Recreate the opponent pool, optionally including policy snapshots."""
 
     pool = OpponentPool(num_players=cfg.num_players, rule_ratio=cfg.rule_ratio_start)
 
@@ -94,8 +100,9 @@ def build_opponent_pool(cfg: SelfPlayConfig, *, snapshots: List[Path], device: s
         for target in [0.55, 0.60, 0.65]:
             pool.add_prob_rule(theta_challenge=theta, target_raise=target, max_extra_raise=2)
 
-    for snap in snapshots:
-        pool.add_policy(str(snap), device=device)
+    if load_snapshots:
+        for snap in snapshots:
+            pool.add_policy(str(snap), device=device)
 
     return pool
 
@@ -106,6 +113,31 @@ def collect_snapshots(directory: Path) -> List[Path]:
     if not directory.is_dir():
         return []
     return sorted(path for path in directory.glob("*.zip") if path.is_file())
+
+
+def prompt_snapshot_mode() -> bool:
+    """询问用户是否加载策略快照，返回 True 表示加载。"""
+
+    message = (
+        "选择对手模式：\n"
+        "  1) 仅规则对手\n"
+        "  2) 规则 + 策略快照 (默认)\n"
+        "请输入选项编号后回车："
+    )
+
+    try:
+        choice = input(message).strip()
+    except EOFError:
+        choice = ""
+
+    normalized = choice.lower()
+    if normalized in {"1", "rule", "rules", "only_rules", "only"}:
+        return False
+    if normalized in {"2", "mixed", "policy", "snapshots"}:
+        return True
+
+    # 默认行为：加载策略快照
+    return True
 
 
 def make_eval_env(
@@ -239,11 +271,6 @@ def parse_args() -> argparse.Namespace:
         help="Optional VecNormalize statistics produced during training.",
     )
     parser.add_argument(
-        "--no-snapshots",
-        action="store_true",
-        help="Do not load policy snapshots into the opponent pool.",
-    )
-    parser.add_argument(
         "--snapshot-dir",
         type=Path,
         default=Path("runs/rl_selfplay/snapshots"),
@@ -275,15 +302,28 @@ def main() -> None:
     cfg.rule_ratio_start = float(np.clip(args.rule_ratio, 0.0, 1.0))
     cfg.rule_ratio_end = cfg.rule_ratio_start
 
+    load_snapshots = prompt_snapshot_mode()
+    if not load_snapshots:
+        cfg.rule_ratio_start = cfg.rule_ratio_end = 1.0
+
     device = auto_select_device()
 
     snapshots: List[Path] = []
-    if not args.no_snapshots:
+    if load_snapshots:
         snapshots = collect_snapshots(args.snapshot_dir)
         if snapshots:
             print(f"Loaded {len(snapshots)} snapshot opponent(s) from {args.snapshot_dir}.")
+        else:
+            print("未找到策略快照，对手将仅使用规则对手。")
+            load_snapshots = False
+            cfg.rule_ratio_start = cfg.rule_ratio_end = 1.0
 
-    pool = build_opponent_pool(cfg, snapshots=snapshots, device=device)
+    pool = build_opponent_pool(
+        cfg,
+        snapshots=snapshots,
+        load_snapshots=load_snapshots,
+        device=device,
+    )
 
     env, restored = make_eval_env(
         pool,
@@ -310,11 +350,14 @@ def main() -> None:
     print(format_summary(metrics))
 
     stats = pool.get_usage_stats()
-    print(
-        "Opponent usage: "
-        f"rules={stats['basic_rule'] + stats['prob_rule']:.1f}% "
-        f"snapshots={stats['policy']:.1f}%"
-    )
+    if load_snapshots:
+        print(
+            "Opponent usage: "
+            f"rules={stats['basic_rule'] + stats['prob_rule']:.1f}% "
+            f"snapshots={stats['policy']:.1f}%"
+        )
+    else:
+        print(f"Opponent usage: rules={stats['basic_rule'] + stats['prob_rule']:.1f}%")
 
 
 if __name__ == "__main__":

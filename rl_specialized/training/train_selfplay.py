@@ -12,6 +12,7 @@ import numpy as np
 import torch as th
 from stable_baselines3 import PPO
 from stable_baselines3.common.callbacks import BaseCallback, EvalCallback
+from stable_baselines3.common.logger import configure
 from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 
 from rl_specialized.training.env_wrappers import OpponentPool, LiarDiceSelfPlayEnv
@@ -435,6 +436,12 @@ class SelfPlayTrainer:
         if self.cfg.device is None:
             self.cfg.device = auto_select_device()
 
+        self.log_dir: Optional[str] = None
+        if self.cfg.tensorboard_log:
+            expanded = os.path.abspath(os.path.expanduser(self.cfg.tensorboard_log))
+            os.makedirs(expanded, exist_ok=True)
+            self.log_dir = expanded
+
         # 构建对手池：初始化若干规则变体（基础 + 概率型）
         self.pool = OpponentPool(num_players=cfg.num_players, rule_ratio=cfg.rule_ratio_start)
         # 基础规则对手：挑战阈值偏移 2..5，起手面值 3/4/5
@@ -500,12 +507,18 @@ class SelfPlayTrainer:
             ent_coef=cfg.ent_coef_start,
             vf_coef=cfg.vf_coef,
             target_kl=cfg.target_kl,
-            tensorboard_log=cfg.tensorboard_log,
+            tensorboard_log=None,
             policy_kwargs=policy_kwargs,
             seed=cfg.seed,
             device=cfg.device,
             verbose=1,  # 添加详细输出
         )
+
+        log_formats = ["stdout"]
+        if self.log_dir:
+            log_formats.extend(["csv", "tensorboard"])
+        new_logger = configure(folder=self.log_dir, format_strings=log_formats)
+        self.model.set_logger(new_logger)
 
     def train(self):
         print(f"开始训练 - 总步数: {self.cfg.total_timesteps}, 玩家数: {self.cfg.num_players}, 设备: {self.cfg.device}")
@@ -515,10 +528,11 @@ class SelfPlayTrainer:
         print(f"规则对手占比: {self.cfg.rule_ratio_start:.1f} → {self.cfg.rule_ratio_end:.1f}")
         print("-" * 60)
 
-        save_dir = os.path.join(self.cfg.tensorboard_log or "runs", "snapshots")
+        base_log_dir = self.log_dir or (self.cfg.tensorboard_log or "runs")
+        save_dir = os.path.join(base_log_dir, "snapshots")
         sp_cb = SelfPlayCallback(pool=self.pool, cfg=self.cfg, save_dir=save_dir)
-        eval_cb = EvalCallback(self.eval_env, best_model_save_path=os.path.join(self.cfg.tensorboard_log or "runs", "best_model"),
-                               log_path=self.cfg.tensorboard_log, eval_freq=max(2000, self.cfg.n_steps),  # 更频繁的评估
+        eval_cb = EvalCallback(self.eval_env, best_model_save_path=os.path.join(base_log_dir, "best_model"),
+                               log_path=base_log_dir, eval_freq=max(2000, self.cfg.n_steps),  # 更频繁的评估
                                deterministic=False, render=False, n_eval_episodes=self.cfg.eval_episodes)
 
         print("开始 PPO 训练...")
