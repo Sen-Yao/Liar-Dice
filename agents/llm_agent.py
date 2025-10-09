@@ -22,11 +22,13 @@ class LLMAgent:
         agent_id: str,
         num_players: int,
         temperature: float = 0.7,
-        enable_stats: bool = True
+        enable_stats: bool = True,
+        use_api: bool = True
     ):
         self.agent_id = agent_id
         self.num_players = num_players
         self.temperature = temperature
+        self.use_api = bool(use_api)
 
         # 从环境变量读取API配置（默认使用Qwen）
         self.api_base = os.getenv(
@@ -34,7 +36,16 @@ class LLMAgent:
             'https://dashscope.aliyuncs.com/compatible-mode/v1'
         )
         self.api_key = os.getenv('DASHSCOPE_API_KEY', 'your-api-key-here')
+        self.has_api = bool(self.api_key and self.api_key != 'your-api-key-here')
         self.model = os.getenv('DASHSCOPE_MODEL', 'qwen-max')
+        
+        # 改进：确保 use_api 和 has_api 行为一致
+        # 如果明确要求使用API但没有API Key，发出警告
+        if use_api and not self.has_api:
+            print(f"[LLMAgent] 警告: use_api=True 但未设置有效的API Key，将使用fallback模式")
+            self.use_api = False
+        else:
+            self.use_api = use_api
 
         # 创建OpenAI兼容客户端
         self.client = OpenAI(
@@ -141,8 +152,19 @@ class LLMAgent:
             {"role": "user", "content": state_description}
         ]
 
-        # 调用LLM API
-        response = self._call_llm_api(messages)
+        # 若无可用API，直接使用fallback，避免阻塞
+        if not (self.has_api and self.use_api):
+            print(f"[LLMAgent] 使用fallback模式: has_api={self.has_api}, use_api={self.use_api}")
+            return self._fallback_action(observation)
+
+        # 调用LLM API（增加保护与超时）
+        try:
+            response = self._call_llm_api(messages)
+        except Exception as e:
+            # API 出错时走 fallback，保证评估不中断
+            if self.stats is not None:
+                self.stats["parse_errors"] += 1
+            return self._fallback_action(observation)
 
         # 记录延迟
         if self.stats is not None:
@@ -246,7 +268,8 @@ class LLMAgent:
                 model=self.model,
                 messages=messages,
                 temperature=self.temperature,
-                max_tokens=600
+                max_tokens=480,
+                timeout=10
             )
 
             return response.choices[0].message.content
@@ -356,10 +379,14 @@ class LLMAgent:
         from utils import get_legal_actions
         import random
 
+        print(f"[LLMAgent] 进入fallback_action")
+        
         if self.stats is not None:
             self.stats["fallback_count"] += 1
 
+        print(f"[LLMAgent] 调用get_legal_actions，num_players={self.num_players}")
         legal_actions = get_legal_actions(observation, self.num_players)
+        print(f"[LLMAgent] get_legal_actions返回，找到{len(legal_actions)}个合法动作")
 
         if not legal_actions:
             # 极端情况：无合法动作（理论上不应发生）
@@ -370,9 +397,12 @@ class LLMAgent:
         guess_actions = [a for a in legal_actions if isinstance(a, Guess)]
         if guess_actions:
             # 选择最小合法猜测（保守策略）
-            return min(guess_actions, key=lambda g: (g.count, g.face))
+            chosen_action = min(guess_actions, key=lambda g: (g.count, g.face))
+            print(f"[LLMAgent] 选择猜测动作: {chosen_action}")
+            return chosen_action
         else:
             # 只能挑战
+            print("[LLMAgent] 选择挑战动作")
             return Challenge()
 
     def get_stats(self) -> dict:

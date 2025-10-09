@@ -102,6 +102,9 @@ python model_playground.py --model-path models/dqn_model.pth --eval-episodes 100
 
 # 人类 vs 训练好的模型
 python model_playground.py --model-path models/dqn_model.pth --interactive
+
+# 全面评估模型性能（对抗多种baseline）
+python evaluator.py --model-path models/dqn_model.pth --num-games 1000 --save-results
 ```
 
 ---
@@ -123,6 +126,7 @@ Liar-Dice/
 ├── train.py                 # 训练入口脚本（DQN 方法）
 ├── main.py                  # 人机对战入口
 ├── model_playground.py      # 模型评估与调试工具
+├── evaluator.py             # DQN模型全面评估工具（对抗多种baseline）
 ├── utils.py                 # 工具函数（动作合法性检查等）
 ├── models/                  # 保存的模型权重（DQN .pth 文件）
 └── rl_specialized/          # 专用 RL 模型（PPO + SB3，独立训练路线）
@@ -174,6 +178,34 @@ python model_playground.py \
   --model-path models/dqn_model.pth \
   --interactive
 ```
+
+**全面评估工具（evaluator.py）**：
+
+```bash
+# 完整评估（对抗所有baseline，每种1000局）
+python evaluator.py \
+  --model-path models/dqn_model.pth \
+  --num-games 1000 \
+  --save-results
+
+# 自定义评估（不包含启发式对手）
+python evaluator.py \
+  --model-path models/dqn_model.pth \
+  --num-games 500 \
+  --no-heuristic
+
+# 包含LLM对手评估（需要API密钥）
+python evaluator.py \
+  --model-path models/dqn_model.pth \
+  --num-games 1000 \
+  --include-llm
+```
+
+**评估指标**：
+- 胜率（vs Random、Conservative、Aggressive、Heuristic、LLM）
+- 平均回合数
+- 动作分布（猜测率、挑战率）
+- 决策质量（非法动作率、fallback率）
 
 ---
 
@@ -299,6 +331,8 @@ tensorboard --logdir runs/rl_specialized
 
 **核心特性**：
 - **API集成**：使用阿里云通义千问（Qwen）API，OpenAI兼容接口
+- **API可用性检查**：自动检测API Key有效性，无API Key时自动使用fallback模式
+- **超时与异常处理**：API调用设置10秒超时，异常时自动fallback，确保评估不中断
 - **三层合法性验证**：
   - Layer 1: Prompt Engineering（系统提示包含完整规则+合法动作提示）
   - Layer 2: Rule-based Validation（使用`utils.is_strictly_greater()`验证）
@@ -318,10 +352,12 @@ export DASHSCOPE_MODEL="qwen-max"  # 或 qwen-plus, qwen-turbo
 # 3. 使用示例
 python -c "
 from agents.llm_agent import LLMAgent
-agent = LLMAgent('llm_player', num_players=2, temperature=0.5, enable_stats=True)
+agent = LLMAgent('llm_player', num_players=2, temperature=0.5, enable_stats=True, use_api=True)
 # ... 在游戏中使用
 stats = agent.get_stats()
-print(f'非法动作率: {stats[\"illegal_rate\"]:.2%}')
+print(f'非法动作率: {stats["illegal_rate"]:.2%}')
+print(f'API可用性: {agent.has_api}')
+print(f'使用API: {agent.use_api}')
 "
 ```
 
@@ -434,6 +470,7 @@ print(f"挑战率: {stats['challenge_rate']:.2%}")
 **特性**：
 - **继承LLMAgent**：复用完整的三层验证机制
 - **优化参数**：使用更低的temperature（0.3 vs 0.7），提高决策确定性
+- **API控制**：新增`use_api`参数，可控制是否使用API（默认True）
 - **100%合法性保证**：继承父类的三层验证（JSON解析 → 规则验证 → Fallback）
 - **统计追踪**：默认启用统计功能
 
@@ -445,11 +482,12 @@ from agents.baseline_agents import OptimizedLLMAgent
 # 需要先设置环境变量
 # export DASHSCOPE_API_KEY="sk-xxxxxxxxxxxxx"
 
-# 创建agent
+# 创建agent（可自定义温度和API使用）
 agent = OptimizedLLMAgent(
     agent_id="llm_0",
     num_players=2,
-    temperature=0.3  # 可自定义温度
+    temperature=0.3,  # 可自定义温度
+    use_api=True      # 控制是否使用API（默认True）
 )
 
 # 获取动作（自动调用API）

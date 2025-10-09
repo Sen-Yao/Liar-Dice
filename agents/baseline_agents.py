@@ -578,7 +578,8 @@ class OptimizedLLMAgent(LLMAgent):
         self,
         agent_id: str,
         num_players: int,
-        temperature: float = 0.3  # 更低的temperature，更确定性
+        temperature: float = 0.3,  # 更低的temperature，更确定性
+        use_api: bool = True       # 修复：默认使用API，避免卡住问题
     ):
         """
         初始化优化的LLM agent
@@ -593,7 +594,8 @@ class OptimizedLLMAgent(LLMAgent):
             agent_id=agent_id,
             num_players=num_players,
             temperature=temperature,
-            enable_stats=True  # 默认启用统计
+            enable_stats=True,  # 默认启用统计
+            use_api=use_api
         )
 
     # 所有其他功能继承自LLMAgent：
