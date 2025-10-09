@@ -114,8 +114,10 @@ Liar-Dice/
 ├── agents/
 │   ├── DQN_agent.py         # DQN 智能体（22维状态，组合动作Q）
 │   ├── heuristic_agent.py   # 启发式规则智能体（含概率型变体）
+│   ├── basic_agent.py       # 基础规则智能体（BasicRuleAgent, ProbabilisticBasicAgent）
 │   ├── human_agent.py       # 人类玩家接口
-│   └── llm_agent.py         # LLM 智能体（基于 OpenAI API）
+│   ├── llm_agent.py         # LLM 智能体（基于通义千问API，三层合法性验证）
+│   └── baseline_agents.py   # Baseline智能体（RandomAgent等，用于性能对比实验）
 ├── train/
 │   └── DQN_train.py         # DQN 训练流程（DDQN + n-step + 奖励整形）
 ├── train.py                 # 训练入口脚本（DQN 方法）
@@ -286,3 +288,105 @@ tensorboard --logdir runs/rl_specialized
 
 ## PPO策略技术特性与算法说明
 详细文档请参考：[rl_specialized/README.md](rl_specialized/README.md)
+
+---
+
+## Baseline实验支持
+
+### LLM Agent（通义千问）
+
+基于大语言模型的智能体，用于评估RL模型的人类水平对比基准。
+
+**核心特性**：
+- **API集成**：使用阿里云通义千问（Qwen）API，OpenAI兼容接口
+- **三层合法性验证**：
+  - Layer 1: Prompt Engineering（系统提示包含完整规则+合法动作提示）
+  - Layer 2: Rule-based Validation（使用`utils.is_strictly_greater()`验证）
+  - Layer 3: Fallback Strategy（验证失败时从合法动作集中选择）
+- **100%合法性保证**：通过三层验证确保输出动作始终合法
+- **测试友好**：内置统计追踪（API调用次数、延迟、非法率、fallback次数等）
+
+**快速开始**：
+
+```bash
+# 1. 设置API Key
+export DASHSCOPE_API_KEY="sk-xxxxxxxxxxxxx"
+
+# 2. 可选：选择模型（默认qwen-max）
+export DASHSCOPE_MODEL="qwen-max"  # 或 qwen-plus, qwen-turbo
+
+# 3. 使用示例
+python -c "
+from agents.llm_agent import LLMAgent
+agent = LLMAgent('llm_player', num_players=2, temperature=0.5, enable_stats=True)
+# ... 在游戏中使用
+stats = agent.get_stats()
+print(f'非法动作率: {stats[\"illegal_rate\"]:.2%}')
+"
+```
+
+**文档**：参见 `agents/LLM_AGENT_README.md`
+
+### Baseline Agents
+
+用于性能对比的基准智能体集合：
+
+#### RandomAgent
+从所有合法动作中均匀随机选择，提供最弱性能下界。
+
+**特性**：
+- 100%合法性保证（使用`utils.get_legal_actions()`）
+- 支持随机种子（可重复实验）
+- 内置统计功能（动作分布、猜测率等）
+
+**使用示例**：
+
+```python
+from agents.baseline_agents import RandomAgent
+
+# 创建agent
+agent = RandomAgent(agent_id="random_0", num_players=2, seed=42)
+
+# 获取动作
+action = agent.get_action(observation)
+
+# 查看统计
+stats = agent.get_stats()
+print(f"猜测比例: {stats['guess_rate']:.2%}")
+```
+
+**应用场景**：
+- 评估环境公平性（随机agent胜率应接近1/n）
+- 提供性能下界（任何智能agent都应超越随机策略）
+- 检测对手agent的可利用弱点
+
+---
+
+## 开发指南
+
+### 代码规范
+
+- **代码语言**：所有代码（变量名、函数名、类名）使用英文
+- **注释语言**：所有代码注释使用中文
+- **文档语言**：所有文档（.md文件、docstring）使用中文
+- **命名规范**：
+  - 类名：PascalCase（如`DQNAgent`）
+  - 函数名/变量名：snake_case（如`get_legal_actions`）
+  - 常量：UPPER_SNAKE_CASE（如`MAX_EPISODES`）
+
+### 合法性一致性
+
+**关键**：修改游戏规则或状态表示时，确保以下文件保持一致：
+1. `env.py`：`LiarDiceEnv._is_strictly_greater()` - 权威规则实现
+2. `utils.py`：`is_strictly_greater()` 和 `get_legal_actions()` - 必须匹配env.py逻辑
+3. `agents/DQN_agent.py`：`_build_guess_legal_mask()` - 必须遵循相同规则
+4. `rl_specialized/action_spaces/base.py`：如使用专用动作空间
+
+### 状态维度变更
+
+如果修改状态表示（当前DQN使用22维）：
+- 更新`DQNAgent`输入维度
+- 更新`env.py`中的observation构建
+- 如使用`rl_specialized`，同步更新`StateEncoder`
+- 作废旧模型检查点（重命名或删除）
+- 更新README.md文档
