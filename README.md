@@ -538,11 +538,6 @@ for agent_id, agent in agents.items():
     print(f"{agent_id}: {stats}")
 ```
 
-**典型统计结果**：
-- ConservativeAgent挑战率：50-60%
-- AggressiveAgent挑战率：10-20%
-- RandomAgent挑战率：约25-35%（取决于游戏状态分布）
-
 ---
 
 ## 开发指南
