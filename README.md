@@ -329,9 +329,9 @@ print(f'非法动作率: {stats[\"illegal_rate\"]:.2%}')
 
 ### Baseline Agents
 
-用于性能对比的基准智能体集合：
+用于性能对比的基准智能体集合（位于 `agents/baseline_agents.py`）：
 
-#### RandomAgent
+#### 1. RandomAgent
 从所有合法动作中均匀随机选择，提供最弱性能下界。
 
 **特性**：
@@ -359,6 +359,151 @@ print(f"猜测比例: {stats['guess_rate']:.2%}")
 - 评估环境公平性（随机agent胜率应接近1/n）
 - 提供性能下界（任何智能agent都应超越随机策略）
 - 检测对手agent的可利用弱点
+
+#### 2. ConservativeAgent
+保守型策略智能体，倾向于挑战而非继续猜测。
+
+**特性**：
+- **保守挑战策略**：使用较低的信心阈值（默认0.5），更容易挑战对手
+- **最小猜测策略**：必须猜测时选择最小合法猜测（count最小，face最小）
+- **概率估计**：基于期望骰子数判断对手猜测是否可信
+- **100%合法性保证**：使用`utils.get_legal_actions()`保证所有动作合法
+
+**使用示例**：
+
+```python
+from agents.baseline_agents import ConservativeAgent
+
+# 创建agent（可自定义信心阈值）
+agent = ConservativeAgent(
+    agent_id="conservative_0",
+    num_players=2,
+    confidence_threshold=0.5  # 越小越容易挑战
+)
+
+# 获取动作
+action = agent.get_action(observation)
+
+# 查看统计（包含挑战率）
+stats = agent.get_stats()
+print(f"挑战率: {stats['challenge_rate']:.2%}")
+```
+
+**应用场景**：
+- 作为保守型baseline，评估激进策略的优势
+- 测试环境对保守策略的奖励设计
+- 提供不同风险偏好的性能对比
+
+#### 3. AggressiveAgent
+激进型策略智能体，倾向于猜测而非挑战。
+
+**特性**：
+- **激进猜测策略**：使用较高的信心阈值（默认2.0），很少挑战对手
+- **大胆猜测策略**：基于手牌选择较大的合法猜测
+- **手牌优化**：优先选择手里较多的点数进行猜测
+- **100%合法性保证**：使用`utils.get_legal_actions()`保证所有动作合法
+
+**使用示例**：
+
+```python
+from agents.baseline_agents import AggressiveAgent
+
+# 创建agent（可自定义信心阈值）
+agent = AggressiveAgent(
+    agent_id="aggressive_0",
+    num_players=2,
+    confidence_threshold=2.0  # 越大越不容易挑战
+)
+
+# 获取动作
+action = agent.get_action(observation)
+
+# 查看统计
+stats = agent.get_stats()
+print(f"挑战率: {stats['challenge_rate']:.2%}")
+```
+
+**应用场景**：
+- 作为激进型baseline，评估保守策略的必要性
+- 测试环境对风险承担的奖励
+- 提供不同风格的性能对比
+
+#### 4. OptimizedLLMAgent
+优化的LLM智能体，继承`LLMAgent`并使用更确定性的参数。
+
+**特性**：
+- **继承LLMAgent**：复用完整的三层验证机制
+- **优化参数**：使用更低的temperature（0.3 vs 0.7），提高决策确定性
+- **100%合法性保证**：继承父类的三层验证（JSON解析 → 规则验证 → Fallback）
+- **统计追踪**：默认启用统计功能
+
+**使用示例**：
+
+```python
+from agents.baseline_agents import OptimizedLLMAgent
+
+# 需要先设置环境变量
+# export DASHSCOPE_API_KEY="sk-xxxxxxxxxxxxx"
+
+# 创建agent
+agent = OptimizedLLMAgent(
+    agent_id="llm_0",
+    num_players=2,
+    temperature=0.3  # 可自定义温度
+)
+
+# 获取动作（自动调用API）
+action = agent.get_action(observation)
+
+# 查看统计（包含API调用信息）
+stats = agent.get_stats()
+print(f"平均延迟: {stats['avg_latency']:.2f}s")
+print(f"非法率: {stats['illegal_rate']:.2%}")
+```
+
+**应用场景**：
+- 作为高级baseline，评估RL模型相对于human-like策略的优势
+- 测试LLM在博弈论游戏中的表现
+- 提供可解释的决策过程（reasoning字段）
+
+### Baseline实验对比
+
+运行多agent对局来评估性能差异：
+
+```python
+from agents.baseline_agents import RandomAgent, ConservativeAgent, AggressiveAgent
+from env import LiarDiceEnv
+
+# 创建环境和agents
+env = LiarDiceEnv(num_players=2)
+agents = {
+    'player_0': ConservativeAgent('player_0', num_players=2),
+    'player_1': AggressiveAgent('player_1', num_players=2)
+}
+
+# 运行多局游戏
+for game in range(100):
+    env.reset()
+    for agent_id in env.agent_iter(100):
+        observation = env.observe(agent_id)
+        if env.terminations[agent_id] or env.truncations[agent_id]:
+            action = None
+        else:
+            action = agents[agent_id].get_action(observation)
+        env.step(action)
+        if all(env.terminations.values()):
+            break
+
+# 查看统计
+for agent_id, agent in agents.items():
+    stats = agent.get_stats()
+    print(f"{agent_id}: {stats}")
+```
+
+**典型统计结果**：
+- ConservativeAgent挑战率：50-60%
+- AggressiveAgent挑战率：10-20%
+- RandomAgent挑战率：约25-35%（取决于游戏状态分布）
 
 ---
 
