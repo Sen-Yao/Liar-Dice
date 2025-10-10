@@ -273,6 +273,34 @@ tensorboard --logdir runs/rl_specialized
 - 自博弈：`runs/rl_selfplay/best_model/best_model.zip` 和 `snapshots/`
 - 规则对抗：`runs/rl_specialized/best_model/best_model.zip`
 
+**PPO 模型评估**：
+
+```bash
+# 自动评估最佳模型（默认包含5个对手：Random、Conservative、Aggressive、Heuristic、LLM）
+python -m rl_specialized.evaluator --num-games 100
+
+# 指定模型路径
+python -m rl_specialized.evaluator \
+  --model-path runs/rl_selfplay/best_model/best_model.zip \
+  --num-games 100
+
+# 排除 LLM 对手（仅测试前4个对手）
+python -m rl_specialized.evaluator --num-games 100 --no-llm
+
+# JSON 输出模式（适合批处理）
+python -m rl_specialized.evaluator --num-games 100 --json
+
+# 保存评估结果
+python -m rl_specialized.evaluator --num-games 100 --save-results
+```
+
+**评估对手列表**（共5个）：
+1. **RandomAgent** - 随机策略（性能下界）
+2. **ConservativeAgent** - 保守策略（低挑战阈值）
+3. **AggressiveAgent** - 激进策略（高挑战阈值）
+4. **HeuristicRuleAgent** - 启发式规则策略
+5. **OptimizedLLMAgent** - 优化 LLM 策略（默认启用，可通过 `--no-llm` 关闭）
+
 ---
 
 ## DQN技术特性
