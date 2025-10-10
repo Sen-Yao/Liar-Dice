@@ -15,12 +15,9 @@ import argparse
 import random
 import statistics
 from dataclasses import dataclass
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List
 from collections import defaultdict
-from tqdm import tqdm
-
-from env import LiarDiceEnv, Guess, Challenge, Action
-from agents.llm_agent import LLMAgent
+from env import LiarDiceEnv, Challenge
 from agents.heuristic_agent import HeuristicRuleAgent
 from agents.basic_agent import BasicRuleAgent, ProbabilisticBasicAgent
 from agents.baseline_agents import RandomAgent, ConservativeAgent, AggressiveAgent, OptimizedLLMAgent
@@ -35,6 +32,11 @@ class GameResult:
     llm_position: int  # LLM代理在游戏中的位置索引
     steps: int
     challenges: int
+
+
+def is_llm_winner(result: GameResult) -> bool:
+    """判断是否由LLM代理获胜"""
+    return result.winner == f"player_{result.llm_position}"
 
 
 
@@ -127,15 +129,11 @@ def run_tournament(llm_agent: OptimizedLLMAgent, opponent_types: List[str], num_
     print(f"LLM代理将对抗的对手类型：{opponent_types}")
 
     for opponent_type in opponent_types:
-        print(f"\n开始与 {opponent_type} 对手对战...")
-
-        # 创建进度条
-        pbar = tqdm(range(num_games), desc=f"VS {opponent_type}",
-                   bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]')
+        print(f"\n对手 {opponent_type} 对战:")
 
         matchup_results = []
 
-        for game_idx in pbar:
+        for game_idx in range(num_games):
             # 随机分配LLM的位置（0或1）
             llm_position = random.randint(0, 1)
 
@@ -144,20 +142,19 @@ def run_tournament(llm_agent: OptimizedLLMAgent, opponent_types: List[str], num_
             matchup_results.append(result)
 
             # 计算当前胜率
-            wins = sum(1 for r in matchup_results if 'llm' in r.winner.lower())
+            wins = sum(1 for r in matchup_results if is_llm_winner(r))
             win_rate = wins / len(matchup_results) * 100
 
-            # 更新进度条描述
-            pbar.set_postfix({
-                '胜率': f'{win_rate:.1f}%',
-                '胜场': f'{wins}/{len(matchup_results)}',
-                '平均奖励': f'{statistics.mean(r.llm_reward for r in matchup_results):+.1f}' if matchup_results else '+0.0'
-            })
+            print(
+                f"  第{game_idx + 1}/{num_games}局:"
+                f" 胜方 {result.winner}"
+                f" | 当前LLM胜率 {win_rate:.1f}% ({wins}/{len(matchup_results)})"
+                f" | 平均奖励 {statistics.mean(r.llm_reward for r in matchup_results):+.1f}"
+            )
 
         # 保存结果
         matchup_key = f"LLM_vs_{opponent_type}"
         results[matchup_key] = matchup_results
-        pbar.close()
 
     return dict(results)
 
@@ -176,7 +173,7 @@ def analyze_results(results: Dict[str, List[GameResult]]) -> None:
         if not games:
             continue
 
-        llm_win_count = sum(1 for g in games if 'llm' in g.winner.lower())
+        llm_win_count = sum(1 for g in games if is_llm_winner(g))
         win_rate = llm_win_count / len(games)
         avg_reward = statistics.mean(g.llm_reward for g in games)
         avg_steps = statistics.mean(g.steps for g in games)
