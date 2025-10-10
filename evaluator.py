@@ -8,6 +8,8 @@ evaluator.py - DQN模型性能评估器
 
 使用方法：
     python evaluator.py --model-path models/dqn_model.pth --num-games 1000
+或：
+    python evaluator.py --model-dir models/<exp_tag> --num-games 1000 --json
 """
 
 import argparse
@@ -17,6 +19,7 @@ from typing import Dict
 from collections import defaultdict
 
 import torch
+import json
 
 from env import LiarDiceEnv
 from agents.DQN_agent import DQNAgent
@@ -49,7 +52,8 @@ class ModelEvaluator:
         self,
         model_path: str,
         num_players: int = 2,
-        device: str = 'cpu'
+        device: str = 'cpu',
+        history_len: int = 0
     ):
         """
         初始化评估器
@@ -90,7 +94,7 @@ class ModelEvaluator:
             raise FileNotFoundError(f"模型文件不存在: {self.model_path}")
 
         # 创建环境
-        self.env = LiarDiceEnv(num_players=num_players)
+        self.env = LiarDiceEnv(num_players=num_players, history_len=(history_len if history_len > 0 else None))
 
         # 评估结果存储
         self.results = {}
@@ -417,8 +421,10 @@ class ModelEvaluator:
 def main():
     """主函数"""
     parser = argparse.ArgumentParser(description='DQN模型评估器')
-    parser.add_argument('--model-path', type=str, default='models/dqn_model.pth',
-                        help='DQN模型文件路径')
+    parser.add_argument('--model-path', type=str, default='',
+                        help='DQN模型文件路径（与 --model-dir 二选一）')
+    parser.add_argument('--model-dir', type=str, default='',
+                        help='模型目录（包含 model.pth 与 config.json）')
     parser.add_argument('--num-games', type=int, default=1000,
                         help='每个对手的对局数量')
     parser.add_argument('--num-players', type=int, default=2,
@@ -428,26 +434,65 @@ def main():
                         help='计算设备')
     parser.add_argument('--no-heuristic', action='store_true',
                         help='不包含启发式对手评估')
-    parser.add_argument('--include-llm', action='store_true', default=True,
+    parser.add_argument('--include-llm', action='store_true', default=False,
                         help='包含LLM对手评估（需要API密钥）')
     parser.add_argument('--save-results', action='store_true',
                         help='保存评估结果到文件')
+    parser.add_argument('--json', action='store_true', help='以 JSON 形式输出核心指标（适合批处理）')
 
     args = parser.parse_args()
 
+    # 解析 model-dir
+    history_len = 0
+    model_path = args.model_path
+    if args.model_dir:
+        mdir = Path(args.model_dir)
+        cfg_path = mdir / 'config.json'
+        model_path = str(mdir / 'model.pth')
+        if cfg_path.exists():
+            try:
+                with open(cfg_path, 'r', encoding='utf-8') as f:
+                    cfg = json.load(f)
+                # 优先从配置复现玩家数与历史长度
+                if 'num_players' in cfg:
+                    args.num_players = int(cfg['num_players'])
+                if 'history_len' in cfg:
+                    history_len = int(cfg['history_len'])
+            except Exception:
+                pass
+
     # 创建评估器
     evaluator = ModelEvaluator(
-        model_path=args.model_path,
+        model_path=model_path or 'models/dqn_model.pth',
         num_players=args.num_players,
-        device=args.device
+        device=args.device,
+        history_len=history_len
     )
 
     # 运行评估
-    results = evaluator.run_full_evaluation(
-        num_games=args.num_games,
-        include_heuristic=not args.no_heuristic,
-        include_llm=args.include_llm
-    )
+    if args.json:
+        # 输出除 LLM 外所有内置对手的评估结果（JSON 列表）
+        results = evaluator.run_full_evaluation(
+            num_games=args.num_games,
+            include_heuristic=not args.no_heuristic,
+            include_llm=False
+        )
+        payload = []
+        for name, res in results.items():
+            payload.append({
+                'opponent': name,
+                'num_games': res['num_games'],
+                'winrate': res['winrate'],
+                'avg_game_length': res['avg_game_length']
+            })
+        print(json.dumps(payload, ensure_ascii=False))
+        return
+    else:
+        results = evaluator.run_full_evaluation(
+            num_games=args.num_games,
+            include_heuristic=not args.no_heuristic,
+            include_llm=args.include_llm
+        )
 
     # 保存结果
     if args.save_results:

@@ -247,6 +247,7 @@ def train_dqn(agent: DQNAgent, env: LiarDiceEnv, args) -> Tuple[DQNAgent, Dict]:
     print(f"   Challenge suppress steps: {getattr(args, 'challenge_suppress_steps', 0)}")
     print(f"   Opponent confidence: {getattr(args, 'opponent_conf_min', 0)} → {args.opponent_confidence}")
     print(f"   Curriculum warmup: {getattr(args, 'curriculum_warmup', 0)} episodes")
+    print(f"   Quick evaluate enabled: {bool(getattr(args, 'quick_eval', False))}")
 
     # Create models directory if it doesn't exist
     os.makedirs("./models", exist_ok=True)
@@ -291,15 +292,29 @@ def train_dqn(agent: DQNAgent, env: LiarDiceEnv, args) -> Tuple[DQNAgent, Dict]:
         if effective_interval > 0 and (episode % effective_interval == 0):
             refresh_frozen_pool()
 
-        opponents = {
-            pid: HeuristicRuleAgent(pid, env.num_players, confidence_threshold=current_conf)
-            for pid in env.possible_agents
-            if pid != agent.agent_id
-        }
-
+        # 构建对手：支持纯启发式 / 纯自博弈 / 混合
+        opponents: Dict[str, HeuristicRuleAgent | DQNAgent] = {}
         episode_assignment = None
-        if getattr(args, "mix_mode", "round") == "episode":
-            episode_assignment = sample_assignment(env, agent, getattr(args, "heuristic_ratio", 0.5))
+        opp_type = getattr(args, "opponent_type", "mixed")
+        if opp_type == "heuristic":
+            opponents = {
+                pid: HeuristicRuleAgent(pid, env.num_players, confidence_threshold=current_conf)
+                for pid in env.possible_agents
+                if pid != agent.agent_id
+            }
+        elif opp_type == "selfplay":
+            # 纯自博弈：为每个非学习席位提供最近的冻结对手
+            frozen_choice = frozen_pool[-1] if frozen_pool else make_frozen_opponent(agent, args, agent_id="frozen")
+            opponents = {
+                pid: frozen_choice
+                for pid in env.possible_agents
+                if pid != agent.agent_id
+            }
+        else:
+            # 混合：按 round/episode 粒度随机分配启发式/冻结对手
+            if getattr(args, "mix_mode", "round") == "episode":
+                episode_assignment = sample_assignment(env, agent, getattr(args, "heuristic_ratio", 0.5))
+            # 在每个 round 中根据 assignment 构建对手实例
 
         rounds = getattr(args, 'rounds_per_episode', 1)
         for _ in range(rounds):
@@ -308,10 +323,21 @@ def train_dqn(agent: DQNAgent, env: LiarDiceEnv, args) -> Tuple[DQNAgent, Dict]:
             round_step = 0
             step_data: List[Dict] = []
 
-            if getattr(args, "mix_mode", "round") == "round":
-                assignment = sample_assignment(env, agent, getattr(args, "heuristic_ratio", 0.5))
-            else:
-                assignment = episode_assignment or sample_assignment(env, agent, getattr(args, "heuristic_ratio", 0.5))
+            if opp_type == "mixed":
+                if getattr(args, "mix_mode", "round") == "round":
+                    assignment = sample_assignment(env, agent, getattr(args, "heuristic_ratio", 0.5))
+                else:
+                    assignment = episode_assignment or sample_assignment(env, agent, getattr(args, "heuristic_ratio", 0.5))
+                # 根据 assignment 动态构建每个席位的对手实例
+                opponents = {}
+                for pid in env.possible_agents:
+                    if pid == agent.agent_id:
+                        continue
+                    policy = assignment.get(pid, "heuristic")
+                    if policy == "heuristic":
+                        opponents[pid] = HeuristicRuleAgent(pid, env.num_players, confidence_threshold=current_conf)
+                    else:
+                        opponents[pid] = frozen_pool[-1] if frozen_pool else make_frozen_opponent(agent, args, agent_id="frozen")
 
             while not done and round_step < args.max_steps_per_episode:
                 current_agent_id = env.agent_selection
@@ -391,12 +417,18 @@ def train_dqn(agent: DQNAgent, env: LiarDiceEnv, args) -> Tuple[DQNAgent, Dict]:
                     if termination or truncation:
                         done = True
                 else:
-                    policy = assignment.get(current_agent_id, "heuristic") if assignment else "heuristic"
-                    if policy == "heuristic" or not frozen_pool:
-                        action = opponents[current_agent_id].get_action(observation)
+                    # 对手动作选择逻辑
+                    if opp_type == "mixed":
+                        # 混合模式：根据 assignment 决定使用启发式或冻结对手
+                        policy = assignment.get(current_agent_id, "heuristic") if assignment else "heuristic"
+                        if policy == "heuristic" or not frozen_pool:
+                            action = opponents[current_agent_id].get_action(observation)
+                        else:
+                            frozen_opponent = random.choice(frozen_pool)
+                            action = frozen_opponent.get_action(observation)
                     else:
-                        frozen_opponent = random.choice(frozen_pool)
-                        action = frozen_opponent.get_action(observation)
+                        # 纯启发式或纯自博弈模式：直接使用预构建的对手
+                        action = opponents[current_agent_id].get_action(observation)
 
                     env.step(action)
 
@@ -422,7 +454,10 @@ def train_dqn(agent: DQNAgent, env: LiarDiceEnv, args) -> Tuple[DQNAgent, Dict]:
                     step_data[-1]['done'] = True
 
             if step_data:
+                # 势能塑形开关：reward_shaping=False 时强制关闭
                 shaping_beta = getattr(args, 'shaping_beta', 0.0)
+                if not getattr(args, 'reward_shaping', True):
+                    shaping_beta = 0.0
                 if shaping_beta > 0:
                     potentials = [
                         _potential_from_state(agent, data['state'], shaping_beta)
@@ -479,9 +514,10 @@ def train_dqn(agent: DQNAgent, env: LiarDiceEnv, args) -> Tuple[DQNAgent, Dict]:
                         if use_wandb:
                             wandb.log({"loss_values": loss}, step=global_step)
 
+        eval_enabled = getattr(args, "quick_eval", False)
         eval_interval = getattr(args, "eval_interval", 0)
         eval_episodes = getattr(args, "eval_episodes", 0)
-        if eval_interval > 0 and eval_episodes > 0 and (episode + 1) % eval_interval == 0:
+        if eval_enabled and eval_interval > 0 and eval_episodes > 0 and (episode + 1) % eval_interval == 0:
             win_rate = quick_evaluate(agent, args.num_players, eval_episodes, current_conf)
             print(
                 f"[Eval] episode={episode + 1} win_rate_vs_heuristic(conf={current_conf}): {win_rate * 100:.1f}%"
@@ -572,43 +608,11 @@ def train_agent_step(agent: DQNAgent, replay_buffer: ReplayBuffer, args) -> floa
 
     with torch.no_grad():
         next_q_main_t, next_q_mode_t, next_q_count_t, next_q_face_t = agent.target_network(next_states)
-        next_q_main_o, next_q_mode_o, next_q_count_o, next_q_face_o = agent.q_network(next_states)
-
         guess_mask, challenge_legal = _build_action_masks(agent, next_states)
         flat_mask = guess_mask.view(guess_mask.size(0), -1)
         has_legal_guess = flat_mask.any(dim=1)
 
-        # Online selection
-        guess_q_online = (
-            next_q_main_o[:, 0].view(-1, 1, 1, 1)
-            + next_q_mode_o.view(-1, 2, 1, 1)
-            + next_q_count_o.view(-1, 1, agent.total_dice, 1)
-            + next_q_face_o.view(-1, 1, 1, 6)
-        ).masked_fill(~guess_mask, float('-inf'))
-
-        guess_q_online_flat = guess_q_online.view(guess_q_online.size(0), -1)
-        best_guess_vals_online, best_guess_idx = guess_q_online_flat.max(dim=1)
-        best_guess_vals_online = torch.where(
-            has_legal_guess,
-            best_guess_vals_online,
-            torch.full_like(best_guess_vals_online, float('-inf'))
-        )
-        best_guess_idx = torch.where(
-            has_legal_guess,
-            best_guess_idx,
-            torch.zeros_like(best_guess_idx)
-        )
-
-        challenge_vals_online = next_q_main_o[:, 1]
-        challenge_vals_online = torch.where(
-            challenge_legal,
-            challenge_vals_online,
-            torch.full_like(challenge_vals_online, float('-inf'))
-        )
-
-        pick_challenge = challenge_vals_online >= best_guess_vals_online
-
-        # Target evaluation
+        # 构造 target 网络上的 guess 值（用于 DDQN 评估或 DQN 直接 max）
         guess_q_target = (
             next_q_main_t[:, 0].view(-1, 1, 1, 1)
             + next_q_mode_t.view(-1, 2, 1, 1)
@@ -616,20 +620,67 @@ def train_agent_step(agent: DQNAgent, replay_buffer: ReplayBuffer, args) -> floa
             + next_q_face_t.view(-1, 1, 1, 6)
         ).masked_fill(~guess_mask, float('-inf'))
 
-        best_guess_target = guess_q_target.view(guess_q_target.size(0), -1).gather(
-            1, best_guess_idx.unsqueeze(1)
-        ).squeeze(1)
-        best_guess_target = torch.where(
-            has_legal_guess,
-            best_guess_target,
-            torch.full_like(best_guess_target, float('-inf'))
-        )
+        if getattr(args, 'ddqn', True):
+            # DDQN: 在线网选择，目标网评估
+            next_q_main_o, next_q_mode_o, next_q_count_o, next_q_face_o = agent.q_network(next_states)
+            guess_q_online = (
+                next_q_main_o[:, 0].view(-1, 1, 1, 1)
+                + next_q_mode_o.view(-1, 2, 1, 1)
+                + next_q_count_o.view(-1, 1, agent.total_dice, 1)
+                + next_q_face_o.view(-1, 1, 1, 6)
+            ).masked_fill(~guess_mask, float('-inf'))
 
-        best_next_q = torch.where(
-            pick_challenge,
-            next_q_main_t[:, 1],
-            best_guess_target
-        )
+            guess_q_online_flat = guess_q_online.view(guess_q_online.size(0), -1)
+            best_guess_vals_online, best_guess_idx = guess_q_online_flat.max(dim=1)
+            best_guess_vals_online = torch.where(
+                has_legal_guess,
+                best_guess_vals_online,
+                torch.full_like(best_guess_vals_online, float('-inf'))
+            )
+            best_guess_idx = torch.where(
+                has_legal_guess,
+                best_guess_idx,
+                torch.zeros_like(best_guess_idx)
+            )
+
+            challenge_vals_online = next_q_main_o[:, 1]
+            challenge_vals_online = torch.where(
+                challenge_legal,
+                challenge_vals_online,
+                torch.full_like(challenge_vals_online, float('-inf'))
+            )
+
+            pick_challenge = challenge_vals_online >= best_guess_vals_online
+
+            best_guess_target = guess_q_target.view(guess_q_target.size(0), -1).gather(
+                1, best_guess_idx.unsqueeze(1)
+            ).squeeze(1)
+            best_guess_target = torch.where(
+                has_legal_guess,
+                best_guess_target,
+                torch.full_like(best_guess_target, float('-inf'))
+            )
+
+            best_next_q = torch.where(
+                pick_challenge,
+                next_q_main_t[:, 1],
+                best_guess_target
+            )
+        else:
+            # Vanilla DQN: 直接在 target 网络上对下一状态的所有动作取最大
+            best_guess_target, _ = guess_q_target.view(guess_q_target.size(0), -1).max(dim=1)
+            best_guess_target = torch.where(
+                has_legal_guess,
+                best_guess_target,
+                torch.full_like(best_guess_target, float('-inf'))
+            )
+            challenge_vals_target = next_q_main_t[:, 1]
+            challenge_vals_target = torch.where(
+                challenge_legal,
+                challenge_vals_target,
+                torch.full_like(challenge_vals_target, float('-inf'))
+            )
+            best_next_q = torch.maximum(challenge_vals_target, best_guess_target)
 
         best_next_q = torch.where(
             torch.isfinite(best_next_q),

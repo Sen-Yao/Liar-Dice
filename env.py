@@ -55,7 +55,7 @@ class LiarDiceEnv(AECEnv):
     }
 
     def __init__(self, num_players: int = 3, dice_per_player: int = 5, render_mode: Optional[str] = None,
-                 use_specialized_action_space: bool = False):
+                 use_specialized_action_space: bool = False, history_len: Optional[int] = None):
         super().__init__()
         assert num_players >= 2, "Game requires at least 2 players"
         
@@ -64,6 +64,8 @@ class LiarDiceEnv(AECEnv):
         self.total_dice = num_players * dice_per_player
         self.render_mode = render_mode
         self.use_specialized_action_space = use_specialized_action_space
+        # 历史长度：None 或 <=0 表示不裁剪（与现状等价）；>0 表示仅暴露最近 k 条历史
+        self.history_len: Optional[int] = history_len if (history_len is None or history_len > 0) else None
         # 专用动作空间：计数从 n+1 开始；否则从 1 开始
         self.min_count = (num_players + 1) if use_specialized_action_space else 1
 
@@ -192,6 +194,12 @@ class LiarDiceEnv(AECEnv):
         """
         dice_counts = np.bincount(self.player_hands[agent], minlength=7)[1:] # Index 0 is unused
 
+        # 根据 history_len 返回裁剪后的历史（仅影响观测，不改变内部完整历史记录）
+        if self.history_len is not None:
+            clipped_history = self.round_history[-self.history_len:]
+        else:
+            clipped_history = self.round_history
+
         state = AgentState(
             my_dice_counts=tuple(dice_counts),
             num_players=self.num_players,
@@ -200,7 +208,7 @@ class LiarDiceEnv(AECEnv):
             current_player_id_idx=self.agent_name_mapping[self.agent_selection],
             is_my_turn=(agent == self.agent_selection),
             last_guess=self.last_guess,  # 保留Guess对象用于兼容
-            game_round_history=tuple((self.agent_name_mapping[a], g) for a, g in self.round_history)
+            game_round_history=tuple((self.agent_name_mapping[a], g) for a, g in clipped_history)
         )
 
         obs_dict = state.__dict__.copy()

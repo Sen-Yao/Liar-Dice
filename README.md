@@ -113,7 +113,7 @@ python evaluator.py --model-path models/dqn_model.pth --num-games 1000 --save-re
 
 ```
 Liar-Dice/
-├── env.py                    # PettingZoo 游戏环境实现
+├── env.py                    # PettingZoo 游戏环境实现（支持 history_len 参数）
 ├── agents/
 │   ├── DQN_agent.py         # DQN 智能体（22维状态，组合动作Q）
 │   ├── heuristic_agent.py   # 启发式规则智能体（含概率型变体）
@@ -122,13 +122,15 @@ Liar-Dice/
 │   ├── llm_agent.py         # LLM 智能体（基于通义千问API，三层合法性验证）
 │   └── baseline_agents.py   # Baseline智能体（RandomAgent等，用于性能对比实验）
 ├── train/
-│   └── DQN_train.py         # DQN 训练流程（DDQN + n-step + 奖励整形）
-├── train.py                 # 训练入口脚本（DQN 方法）
+│   └── DQN_train.py         # DQN 训练流程（DDQN + n-step + 奖励整形 + 对手类型选择）
+├── train.py                 # 训练入口脚本（DQN 方法，自动保存 config.json）
 ├── main.py                  # 人机对战入口
 ├── model_playground.py      # 模型评估与调试工具
-├── evaluator.py             # DQN模型全面评估工具（对抗多种baseline）
+├── evaluator.py             # DQN模型全面评估工具（支持 --model-dir 和 --json 输出）
+├── run_dqn_ablations.py     # DQN 消融实验自动化工具
 ├── utils.py                 # 工具函数（动作合法性检查等）
-├── models/                  # 保存的模型权重（DQN .pth 文件）
+├── models/                  # 保存的模型权重（按 exp_tag 组织，包含 model.pth 和 config.json）
+├── runs/ablations_dqn/      # 消融实验结果存储目录
 └── rl_specialized/          # 专用 RL 模型（PPO + SB3，独立训练路线）
     ├── action_spaces/       # 玩家数量特定的动作空间
     ├── agents/              # 专用智能体实现
@@ -154,15 +156,22 @@ python train.py \
   --shaping_beta 0.2 \
   --target_soft_tau 0.005 \
   --min_epsilon 0.1 \
-  --save_model_freq 1000
+  --save_model_freq 1000 \
+  --opponent_type mixed
 ```
 
 **关键超参数**：
 - `--n_step`：n-step 回报的步长（默认 3，加速稀疏奖励传播）
 - `--shaping_beta`：势能奖励整形系数（默认 0.2）
+- `--reward_shaping`：是否启用势能塑形（默认 True）
+- `--ddqn`：是否启用 Double DQN（默认 True）
 - `--target_soft_tau`：目标网络 Polyak 软更新系数（默认 0.005）
 - `--min_epsilon`：探索率下限（默认 0.1，避免过早收敛）
-- `--heuristic_ratio`：启发式对手占比（默认 0.5，自博弈对手占另一半）
+- `--opponent_type`：对手类型（mixed/heuristic/selfplay，默认 mixed）
+- `--heuristic_ratio`：启发式对手占比（默认 0.5，仅在 mixed 模式生效）
+- `--history_len`：观测中保留的历史长度（0 表示不裁剪，默认 0）
+- `--exp_tag`：实验标签（留空自动生成）
+- `--quick_eval`：是否启用训练中快速评估（默认 False）
 
 **DQN 模型评估**：
 
@@ -206,6 +215,29 @@ python evaluator.py \
 - 平均回合数
 - 动作分布（猜测率、挑战率）
 - 决策质量（非法动作率、fallback率）
+
+### DQN 消融实验工具
+
+项目提供 `run_dqn_ablations.py` 用于自动化运行消融实验：
+
+```bash
+# 运行单个消融实验
+python run_dqn_ablations.py --ablation ddqn_off --num-episodes 1000 --eval-games 300
+
+# 可用的消融实验：
+# - baseline: 默认配置（DDQN + 势能塑形 + n-step=3 + mixed对手）
+# - ddqn_off: 关闭 Double DQN
+# - reward_shaping_off: 关闭势能奖励塑形
+# - n_step_1: 使用 1-step TD（关闭 n-step）
+# - history_3: 历史长度限制为 3
+# - history_5: 历史长度限制为 5
+# - opponent_heuristic: 纯启发式对手
+# - opponent_selfplay: 纯自博弈对手
+```
+
+**输出**：
+- 训练好的模型保存在 `models/<exp_tag>/`
+- 评估结果保存在 `runs/ablations_dqn/<exp_tag>/results.json`
 
 ---
 
@@ -265,12 +297,16 @@ tensorboard --logdir runs/rl_specialized
   - 鼓励合理抬价，抑制虚高叫点或过早开牌
 - **理论保证**：势能整形不改变最优策略（Ng et al., 1999）
 
-### 4. 对手课程学习
-- **启发式对手**：挑战阈值随训练线性提升（从 0.3 → 0.7），模拟对手逐渐变强
-- **自博弈对手**：每隔一定 episode 冻结当前策略作为对手，构建多样化对手池
-- **动态混合**：按比例采样启发式对手和冻结对手（默认各占 50%）
+### 4. 对手课程学习与类型选择
+- **三种对手类型**（通过 `--opponent_type` 参数控制）：
+  - `mixed`（默认）：动态混合启发式对手和自博弈对手
+  - `heuristic`：纯启发式对手（挑战阈值随训练线性提升）
+  - `selfplay`：纯自博弈对手（使用冻结的历史策略）
+- **启发式对手课程**：挑战阈值随训练线性提升（从 0.3 → 0.7），模拟对手逐渐变强
+- **自博弈对手池**：每隔一定 episode 冻结当前策略作为对手，构建多样化对手池
+- **动态混合模式**：按比例采样启发式对手和冻结对手（默认各占 50%，通过 `--heuristic_ratio` 控制）
 
-### 5. 扩展状态表示（22 维）
+### 5. 扩展状态表示（22 维）+ 历史长度控制
 为缓解部分可观测（POMDP）问题，状态向量包含：
 - 手牌点数分布（6 维）
 - 游戏基本信息（玩家数、当前玩家、首手玩家标记等，4 维）
@@ -280,6 +316,10 @@ tensorboard --logdir runs/rl_specialized
   - 最近 3 次数量变化
   - 模式切换历史
   - 当前是否为首手标记
+- **历史长度控制**（通过 `--history_len` 参数）：
+  - 默认 0：不裁剪，暴露完整游戏历史
+  - 设置为正整数：仅暴露最近 N 条历史记录
+  - 用途：研究记忆长度对 POMDP 决策的影响（消融实验）
 
 ### 6. Polyak 软目标更新
 - 采用 τ=0.005 的软更新替代硬拷贝：θ_target ← τθ + (1-τ)θ_target
@@ -312,8 +352,12 @@ tensorboard --logdir runs/rl_specialized
 | `learning_rate` | 0.0001 | 学习率 | 过高易震荡，过低收敛慢 |
 | `n_step` | 3 | n-step 步长 | 2-5 为宜，过大延迟奖励传播 |
 | `shaping_beta` | 0.2 | 势能整形系数 | 0.1-0.3，过大可能掩盖真实奖励 |
+| `reward_shaping` | True | 是否启用势能塑形 | 关闭后退化为纯稀疏奖励训练 |
+| `ddqn` | True | 是否启用 Double DQN | 关闭后退化为 Vanilla DQN |
 | `min_epsilon` | 0.1 | 探索率下限 | 0.05-0.15，过低易收敛到局部最优 |
 | `target_soft_tau` | 0.005 | 目标网络更新率 | 0.001-0.01，过大目标网络变化快 |
+| `opponent_type` | mixed | 对手类型 | heuristic 稳定但单一，selfplay 多样但初期弱，mixed 平衡 |
+| `history_len` | 0 | 历史长度限制 | 0=完整历史，3-5 研究记忆影响 |
 | `gamma` | 0.99 | 折扣因子 | 固定，短局博弈不建议调整 |
 
 ---
