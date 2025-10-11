@@ -579,7 +579,8 @@ class OptimizedLLMAgent(LLMAgent):
         agent_id: str,
         num_players: int,
         temperature: float = 0.3,  # 更低的temperature，更确定性
-        use_api: bool = True       # 修复：默认使用API，避免卡住问题
+        use_api: bool = True,      # 修复：默认使用API，避免卡住问题
+        enable_thinking: bool = False  # 是否启用推理模式（思考模式）
     ):
         """
         初始化优化的LLM agent
@@ -588,6 +589,8 @@ class OptimizedLLMAgent(LLMAgent):
             agent_id: agent标识符
             num_players: 游戏玩家数量
             temperature: LLM采样温度（默认0.3，更确定性）
+            use_api: 是否使用API（默认True）
+            enable_thinking: 是否启用推理模式（默认False）
         """
         # 调用父类初始化，启用统计
         super().__init__(
@@ -595,7 +598,8 @@ class OptimizedLLMAgent(LLMAgent):
             num_players=num_players,
             temperature=temperature,
             enable_stats=True,  # 默认启用统计
-            use_api=use_api
+            use_api=use_api,
+            enable_thinking=enable_thinking  # 传递推理模式参数
         )
 
     # 所有其他功能继承自LLMAgent：

@@ -23,12 +23,14 @@ class LLMAgent:
         num_players: int,
         temperature: float = 0.7,
         enable_stats: bool = True,
-        use_api: bool = True
+        use_api: bool = True,
+        enable_thinking: bool = False
     ):
         self.agent_id = agent_id
         self.num_players = num_players
         self.temperature = temperature
         self.use_api = bool(use_api)
+        self.enable_thinking = enable_thinking  # 启用推理模式（思考模式）
 
         # 从环境变量读取API配置（默认使用Qwen）
         self.api_base = os.getenv(
@@ -59,7 +61,9 @@ class LLMAgent:
             "total_latency": 0.0,
             "illegal_attempts": 0,
             "fallback_count": 0,
-            "parse_errors": 0
+            "parse_errors": 0,
+            "thinking_mode_calls": 0,  # 推理模式调用次数
+            "thinking_content_length": 0  # 思考内容总长度
         } if enable_stats else None
 
         # 创建系统提示
@@ -258,21 +262,77 @@ class LLMAgent:
             dice.extend([face] * count)
         return f"[{', '.join(map(str, sorted(dice)))}]"
 
+    def _call_thinking_mode(self, messages: List[dict]) -> str:
+        """
+        调用推理模式（Thinking Mode）
+
+        使用流式输出捕获 reasoning_content 和最终答案
+        返回格式: "THINKING: <思考过程>\nANSWER: <答案内容>"
+        """
+        reasoning_content = ""
+        answer_content = ""
+
+        try:
+            # 使用流式调用 + enable_thinking 参数
+            completion = self.client.chat.completions.create(
+                model=self.model,
+                messages=messages,
+                temperature=self.temperature,
+                max_tokens=2048,  # 推理模式需要更多tokens
+                timeout=30,  # 推理模式需要更长超时时间
+                stream=True,
+                extra_body={"enable_thinking": True}
+            )
+
+            # 遍历流式输出
+            for chunk in completion:
+                if chunk.choices and len(chunk.choices) > 0:
+                    delta = chunk.choices[0].delta
+
+                    # 捕获思考过程（reasoning_content）
+                    if hasattr(delta, 'reasoning_content') and delta.reasoning_content:
+                        reasoning_content += delta.reasoning_content
+
+                    # 捕获最终答案（content）
+                    if hasattr(delta, 'content') and delta.content:
+                        answer_content += delta.content
+
+            # 返回组合后的结果
+            if reasoning_content:
+                return f"THINKING: {reasoning_content.strip()}\nANSWER: {answer_content.strip()}"
+            else:
+                # 如果没有思考过程，只返回答案
+                return answer_content.strip()
+
+        except Exception as e:
+            raise Exception(f"推理模式调用失败: {e}")
+
     def _call_llm_api(self, messages: List[dict]) -> str:
-        """调用LLM API（含统计与错误处理）"""
+        """
+        调用LLM API（含统计与错误处理）
+
+        当启用推理模式时：
+        - 设置 extra_body={"enable_thinking": True}
+        - 使用流式输出分离思考过程和答案内容
+        - 返回格式: "THINKING: <思考过程>\nANSWER: <答案内容>"
+        """
         if self.stats is not None:
             self.stats["api_calls"] += 1
 
         try:
-            response = self.client.chat.completions.create(
-                model=self.model,
-                messages=messages,
-                temperature=self.temperature,
-                max_tokens=480,
-                timeout=10
-            )
-
-            return response.choices[0].message.content
+            # 根据是否启用推理模式选择调用方式
+            if self.enable_thinking:
+                return self._call_thinking_mode(messages)
+            else:
+                # 非推理模式：直接调用
+                response = self.client.chat.completions.create(
+                    model=self.model,
+                    messages=messages,
+                    temperature=self.temperature,
+                    max_tokens=480,
+                    timeout=10
+                )
+                return response.choices[0].message.content
 
         except Exception as e:
             if self.stats is not None:
@@ -286,8 +346,32 @@ class LLMAgent:
         Layer 1: JSON解析与格式验证
         Layer 2: 游戏规则合法性验证（调用utils.is_strictly_greater）
         Layer 3: Fallback策略（从合法动作中随机选择）
+
+        推理模式处理：
+        - 如果response包含 "THINKING:" 和 "ANSWER:"，提取ANSWER部分
+        - 可选：记录思考过程用于调试
         """
         try:
+            # 处理推理模式输出：提取ANSWER部分
+            if "THINKING:" in response and "ANSWER:" in response:
+                # 分离思考过程和答案
+                parts = response.split("ANSWER:", 1)
+                if len(parts) == 2:
+                    thinking_part = parts[0].replace("THINKING:", "").strip()
+                    answer_part = parts[1].strip()
+
+                    # 记录思考内容统计
+                    if self.stats is not None:
+                        self.stats["thinking_mode_calls"] += 1
+                        self.stats["thinking_content_length"] += len(thinking_part)
+
+                    # 可选：打印思考过程用于调试
+                    if self.enable_thinking:
+                        print(f"\n[LLMAgent 思考过程]:\n{thinking_part[:200]}...\n")
+
+                    # 使用答案部分继续解析
+                    response = answer_part
+
             # Layer 1: JSON解析
             json_match = re.search(r'\{.*\}', response, re.DOTALL)
             if not json_match:
@@ -417,6 +501,12 @@ class LLMAgent:
         else:
             stats["avg_latency"] = 0.0
             stats["illegal_rate"] = 0.0
+
+        # 添加推理模式统计
+        if stats["thinking_mode_calls"] > 0:
+            stats["avg_thinking_length"] = stats["thinking_content_length"] / stats["thinking_mode_calls"]
+        else:
+            stats["avg_thinking_length"] = 0.0
 
         return stats
 

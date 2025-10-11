@@ -40,7 +40,7 @@ def is_llm_winner(result: GameResult) -> bool:
 
 
 
-def create_agent(agent_type: str, agent_id: str, num_players: int) -> object:
+def create_agent(agent_type: str, agent_id: str, num_players: int, enable_thinking: bool = False) -> object:
     """创建指定类型的代理"""
     if agent_type == "random":
         return RandomAgent(agent_id, num_players)
@@ -55,12 +55,12 @@ def create_agent(agent_type: str, agent_id: str, num_players: int) -> object:
     elif agent_type == "probabilistic":
         return ProbabilisticBasicAgent(agent_id, num_players)
     elif agent_type == "llm":
-        return OptimizedLLMAgent(agent_id, num_players)
+        return OptimizedLLMAgent(agent_id, num_players, enable_thinking=enable_thinking)
     else:
         raise ValueError(f"Unknown agent type: {agent_type}")
 
 
-def run_single_game(llm_agent: OptimizedLLMAgent, opponent_types: List[str], llm_position: int = 0) -> GameResult:
+def run_single_game(llm_agent: OptimizedLLMAgent, opponent_types: List[str], llm_position: int = 0, enable_thinking: bool = False) -> GameResult:
     """运行单局游戏"""
     num_players = len(opponent_types) + 1
     env = LiarDiceEnv(num_players=num_players)
@@ -75,10 +75,10 @@ def run_single_game(llm_agent: OptimizedLLMAgent, opponent_types: List[str], llm
     agents[llm_player] = llm_agent
     agent_types[llm_player] = "llm"
 
-    # 创建对手代理
+    # 创建对手代理（如果是LLM也启用思考模式）
     opponent_players = [p for i, p in enumerate(player_names) if i != llm_position]
     for player, opp_type in zip(opponent_players, opponent_types):
-        agents[player] = create_agent(opp_type, player, num_players)
+        agents[player] = create_agent(opp_type, player, num_players, enable_thinking=enable_thinking)
         agent_types[player] = opp_type
 
     # 运行游戏
@@ -121,12 +121,14 @@ def run_single_game(llm_agent: OptimizedLLMAgent, opponent_types: List[str], llm
     )
 
 
-def run_tournament(llm_agent: OptimizedLLMAgent, opponent_types: List[str], num_games: int) -> Dict[str, List[GameResult]]:
+def run_tournament(llm_agent: OptimizedLLMAgent, opponent_types: List[str], num_games: int, enable_thinking: bool = False) -> Dict[str, List[GameResult]]:
     """运行两人对战锦标赛，LLM与每个对手进行num_games局对战"""
     results = defaultdict(list)
 
     print(f"开始两人对战锦标赛：每个对手进行 {num_games} 局游戏")
     print(f"LLM代理将对抗的对手类型：{opponent_types}")
+    if enable_thinking:
+        print("思考模式：已启用")
 
     for opponent_type in opponent_types:
         print(f"\n对手 {opponent_type} 对战:")
@@ -138,7 +140,7 @@ def run_tournament(llm_agent: OptimizedLLMAgent, opponent_types: List[str], num_
             llm_position = random.randint(0, 1)
 
             # 运行游戏
-            result = run_single_game(llm_agent, [opponent_type], llm_position)
+            result = run_single_game(llm_agent, [opponent_type], llm_position, enable_thinking=enable_thinking)
             matchup_results.append(result)
 
             # 计算当前胜率
@@ -214,6 +216,12 @@ def main():
         type=str,
         help="OpenAI API密钥（如果需要）"
     )
+    parser.add_argument(
+        "--enable-thinking",
+        action="store_true",
+        default=True,
+        help="启用思考模式（Thinking Mode）"
+    )
 
     args = parser.parse_args()
 
@@ -223,13 +231,14 @@ def main():
 
     # 创建LLM代理（两人模式）
     print("初始化LLM代理...")
-    llm_agent = OptimizedLLMAgent("llm_player", 2)
+    llm_agent = OptimizedLLMAgent("llm_player", 2, enable_thinking=args.enable_thinking)
 
     # 运行锦标赛
     results = run_tournament(
         llm_agent=llm_agent,
         opponent_types=args.opponents,
-        num_games=args.num_games
+        num_games=args.num_games,
+        enable_thinking=args.enable_thinking
     )
 
     # 分析结果
